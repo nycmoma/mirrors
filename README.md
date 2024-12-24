@@ -1,0 +1,2 @@
+# mirrors
+ubuntu mirroring studies
