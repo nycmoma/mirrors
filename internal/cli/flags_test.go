@@ -38,3 +38,23 @@ func TestParseDateFlag(t *testing.T) {
 		t.Fatalf("unexpected date: %q", cmd.Date)
 	}
 }
+
+func TestParseCreateConfig(t *testing.T) {
+	cmd, err := Parse([]string{"create", "-c", "mirror.conf"})
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cmd.Name != "create" || cmd.ConfigPath != "mirror.conf" {
+		t.Fatalf("unexpected command: %#v", cmd)
+	}
+}
+
+func TestParseCleanupRemove(t *testing.T) {
+	cmd, err := Parse([]string{"cleanup", "-n", "ubuntu-xenial", "--remove"})
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if !cmd.Remove {
+		t.Fatal("expected remove flag")
+	}
+}

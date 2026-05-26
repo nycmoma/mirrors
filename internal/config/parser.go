@@ -14,18 +14,23 @@ func Load(path string) (Mirror, error) {
 		return Mirror{}, err
 	}
 
+	merge, err := parseMerge(raw["merge"])
+	if err != nil {
+		return Mirror{}, err
+	}
+
 	return Mirror{
-		Name:       raw["name"],
-		URL:        raw["url"],
+		Name:       strings.TrimSpace(raw["name"]),
+		URL:        strings.TrimSpace(raw["url"]),
 		Dists:      splitList(raw["dist"]),
 		Releases:   splitList(defaultString(raw["release"], "default")),
-		Origin:     defaultString(raw["origin"], "default"),
-		Label:      defaultString(raw["label"], "default"),
+		Origin:     strings.TrimSpace(defaultString(raw["origin"], "default")),
+		Label:      strings.TrimSpace(defaultString(raw["label"], "default")),
 		Arch:       splitList(raw["arch"]),
 		Components: splitList(raw["components"]),
-		Path:       raw["path"],
-		Merge:      parseMerge(raw["merge"]),
-		Server:     raw["server"],
+		Path:       strings.TrimSpace(raw["path"]),
+		Merge:      merge,
+		Server:     strings.TrimSpace(raw["server"]),
 	}, nil
 }
 
@@ -88,21 +93,21 @@ func defaultString(value, fallback string) string {
 	return value
 }
 
-func parseMerge(value string) Merge {
+func parseMerge(value string) (Merge, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
 	case "", "no", "false", "0":
-		return Merge{}
+		return Merge{}, nil
 	case "yes", "true":
-		return Merge{Enabled: true}
+		return Merge{Enabled: true}, nil
 	}
 
 	depth := 0
 	for _, char := range value {
 		if char < '0' || char > '9' {
-			return Merge{Enabled: true}
+			return Merge{}, fmt.Errorf("invalid merge value %q: use no, yes, 0, or a positive number", value)
 		}
 		depth = depth*10 + int(char-'0')
 	}
-	return Merge{Enabled: depth > 0, Depth: depth}
+	return Merge{Enabled: depth > 0, Depth: depth}, nil
 }

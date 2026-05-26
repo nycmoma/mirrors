@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -27,9 +29,36 @@ type Merge struct {
 	Depth   int
 }
 
+const (
+	stateDirName   = ".mirrors"
+	dbDirName      = "db"
+	packageDirName = "packages"
+)
+
+var validMirrorName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
 // DBPath returns the default per-mirror SQLite database path.
 func DBPath(mirrorName string) string {
-	return filepath.Join("~", ".mirrors", "db", mirrorName+".sqlite")
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = "~"
+	}
+	return DBPathForHome(home, mirrorName)
+}
+
+// DBPathForHome returns the per-mirror SQLite database path for a specific home directory.
+func DBPathForHome(home, mirrorName string) string {
+	return filepath.Join(home, stateDirName, dbDirName, mirrorName+".sqlite")
+}
+
+// DBDirForHome returns the directory that contains per-mirror SQLite databases.
+func DBDirForHome(home string) string {
+	return filepath.Join(home, stateDirName, dbDirName)
+}
+
+// PackageDirForHome returns the package pool directory for a specific home directory.
+func PackageDirForHome(home string) string {
+	return filepath.Join(home, stateDirName, packageDirName)
 }
 
 // String renders the config in INI form.
