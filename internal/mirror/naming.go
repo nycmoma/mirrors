@@ -32,3 +32,8 @@ func ComponentMirrorNames(prefix string, dists, releases, components []string) [
 func SnapshotName(componentMirrorName, date string) string {
 	return componentMirrorName + "_" + date
 }
+
+// MergedSnapshotName returns the dated merged snapshot name for a component mirror.
+func MergedSnapshotName(componentMirrorName, date string) string {
+	return "MERGED-" + SnapshotName(componentMirrorName, date)
+}

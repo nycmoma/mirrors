@@ -2,7 +2,7 @@
 
 Purpose-built Debian mirror manager.
 
-The old `mirror.py` port is saved in `backup/main.go`. Current development is
+The old `mirror.py` port is saved in `backup/main.go.bak`. Current development is
 moving toward the final design described in `DESIGN.md` and `PLAN.md`: replace
 the subset of aptly needed for mirror workflows without depending on the aptly
 binary.

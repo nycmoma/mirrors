@@ -117,7 +117,9 @@ merge = `+tt.value+`
 }
 
 func TestLoadRejectsInvalidMerge(t *testing.T) {
-	path := writeTempConfig(t, `[mirror]
+	tests := []string{"sometimes", "true", "false"}
+	for _, value := range tests {
+		path := writeTempConfig(t, `[mirror]
 name = ubuntu-xenial
 url = http://archive.ubuntu.com/ubuntu/
 dist = xenial
@@ -125,10 +127,42 @@ release = default
 arch = amd64
 components = main
 path = ubuntu
-merge = sometimes
+merge = `+value+`
 `)
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected invalid merge error")
+		if _, err := Load(path); err == nil {
+			t.Fatalf("expected invalid merge error for %q", value)
+		}
+	}
+}
+
+func TestLoadUbuntuStyleConfig(t *testing.T) {
+	path := writeTempConfig(t, `[mirror]
+name = ubuntu
+aptly_cfg = aptly_cfg/prod_mirrors.conf
+url = http://us.archive.ubuntu.com/ubuntu/
+dist = trusty, xenial, bionic, focal, jammy
+release = default, security, updates
+label = aptly_default
+origin = aptly_default
+arch = amd64
+components = main, restricted, multiverse, universe
+update = weekly
+path = preprod
+server = http://dlt-ubmirror.datto.com
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Name != "ubuntu" {
+		t.Fatalf("unexpected name: %q", cfg.Name)
+	}
+	assertStringSlice(t, cfg.Dists, []string{"trusty", "xenial", "bionic", "focal", "jammy"})
+	assertStringSlice(t, cfg.Releases, []string{"default", "security", "updates"})
+	assertStringSlice(t, cfg.Components, []string{"main", "restricted", "multiverse", "universe"})
+	if cfg.Merge.Enabled {
+		t.Fatalf("expected merge disabled by default, got %#v", cfg.Merge)
 	}
 }
 

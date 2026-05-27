@@ -14,24 +14,56 @@ func Load(path string) (Mirror, error) {
 		return Mirror{}, err
 	}
 
-	merge, err := parseMerge(raw["merge"])
+	merge, err := ParseMerge(raw["merge"])
 	if err != nil {
 		return Mirror{}, err
 	}
 
-	return Mirror{
+	return FromValues(Values{
 		Name:       strings.TrimSpace(raw["name"]),
 		URL:        strings.TrimSpace(raw["url"]),
-		Dists:      splitList(raw["dist"]),
-		Releases:   splitList(defaultString(raw["release"], "default")),
+		Dist:       raw["dist"],
+		Release:    raw["release"],
 		Origin:     strings.TrimSpace(defaultString(raw["origin"], "default")),
 		Label:      strings.TrimSpace(defaultString(raw["label"], "default")),
-		Arch:       splitList(raw["arch"]),
-		Components: splitList(raw["components"]),
+		Arch:       raw["arch"],
+		Components: raw["components"],
 		Path:       strings.TrimSpace(raw["path"]),
 		Merge:      merge,
 		Server:     strings.TrimSpace(raw["server"]),
-	}, nil
+	}), nil
+}
+
+// Values contains raw scalar config values before list normalization.
+type Values struct {
+	Name       string
+	URL        string
+	Dist       string
+	Release    string
+	Origin     string
+	Label      string
+	Arch       string
+	Components string
+	Path       string
+	Merge      Merge
+	Server     string
+}
+
+// FromValues builds a normalized Mirror from raw config values.
+func FromValues(values Values) Mirror {
+	return Mirror{
+		Name:       strings.TrimSpace(values.Name),
+		URL:        strings.TrimSpace(values.URL),
+		Dists:      splitList(values.Dist),
+		Releases:   splitList(defaultString(values.Release, "default")),
+		Origin:     strings.TrimSpace(defaultString(values.Origin, "default")),
+		Label:      strings.TrimSpace(defaultString(values.Label, "default")),
+		Arch:       splitList(values.Arch),
+		Components: splitList(values.Components),
+		Path:       strings.TrimSpace(values.Path),
+		Merge:      values.Merge,
+		Server:     strings.TrimSpace(values.Server),
+	}
 }
 
 func readMirrorSection(path string) (map[string]string, error) {
@@ -93,12 +125,12 @@ func defaultString(value, fallback string) string {
 	return value
 }
 
-func parseMerge(value string) (Merge, error) {
+func ParseMerge(value string) (Merge, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
-	case "", "no", "false", "0":
+	case "", "no", "0":
 		return Merge{}, nil
-	case "yes", "true":
+	case "yes":
 		return Merge{Enabled: true}, nil
 	}
 

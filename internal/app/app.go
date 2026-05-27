@@ -7,6 +7,7 @@ import (
 	"mirrors/internal/cli"
 	"mirrors/internal/config"
 	"mirrors/internal/mirror"
+	"mirrors/internal/state"
 )
 
 // Run is the top-level application entrypoint used by main.
@@ -60,11 +61,19 @@ func runConfig(cmd cli.Command) error {
 		fmt.Printf("Config %q is valid for mirror %q\n", cmd.ConfigPath, cfg.Name)
 		return nil
 	case "show":
+		if cmd.ConfigPath != "" && cmd.NameRef != "" {
+			return fmt.Errorf("ambiguous config identity: provide either --config or --name, not both")
+		}
 		if cmd.ConfigPath == "" && cmd.NameRef == "" {
 			return fmt.Errorf("missing config or name. Use: mirror config show -c <config_file> or mirror config show -n <mirror_name>")
 		}
 		if cmd.ConfigPath == "" {
-			return notImplemented("config show by name")
+			cfg, err := state.LoadMirrorConfig(config.DBPath(cmd.NameRef))
+			if err != nil {
+				return err
+			}
+			fmt.Print(cfg.String())
+			return nil
 		}
 		cfg, err := config.Load(cmd.ConfigPath)
 		if err != nil {

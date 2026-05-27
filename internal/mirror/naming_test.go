@@ -35,3 +35,11 @@ func TestSnapshotName(t *testing.T) {
 		t.Fatalf("SnapshotName returned %q, want %q", got, want)
 	}
 }
+
+func TestMergedSnapshotName(t *testing.T) {
+	got := MergedSnapshotName("ubuntu-focal-main", "2026-05-26")
+	want := "MERGED-ubuntu-focal-main_2026-05-26"
+	if got != want {
+		t.Fatalf("MergedSnapshotName returned %q, want %q", got, want)
+	}
+}
