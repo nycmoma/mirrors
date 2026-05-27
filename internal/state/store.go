@@ -3,6 +3,8 @@ package state
 import (
 	"database/sql"
 	"fmt"
+	"strings"
+	"time"
 
 	"mirrors/internal/config"
 
@@ -11,21 +13,81 @@ import (
 
 // LoadMirrorConfig loads the normalized mirror config stored in a per-mirror DB.
 func LoadMirrorConfig(dbPath string) (config.Mirror, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	store, err := Open(dbPath)
 	if err != nil {
 		return config.Mirror{}, err
 	}
 	defer func() {
-		_ = db.Close()
+		_ = store.Close()
 	}()
 
-	var values config.Values
-	var mergeValue string
-	err = db.QueryRow(`
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		return config.Mirror{}, fmt.Errorf("load mirror config from %s: %w", dbPath, err)
+	}
+	return cfg, nil
+}
+
+// SaveMirrorConfig replaces the one mirror config record stored in this DB.
+func (s *Store) SaveMirrorConfig(cfg config.Mirror) error {
+	return s.WithTx(func(tx *Tx) error {
+		return tx.SaveMirrorConfig(cfg)
+	})
+}
+
+// SaveMirrorConfig replaces the one mirror config record stored in this DB.
+func (tx *Tx) SaveMirrorConfig(cfg config.Mirror) error {
+	if err := config.Validate(cfg); err != nil {
+		return err
+	}
+
+	if _, err := tx.tx.Exec(`DELETE FROM mirror`); err != nil {
+		return err
+	}
+	_, err := tx.tx.Exec(`
+INSERT INTO mirror (
+	name, url, dist, release, origin, label, arch, components, path, merge, server
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`,
+		cfg.Name,
+		cfg.URL,
+		strings.Join(cfg.Dists, ", "),
+		strings.Join(cfg.Releases, ", "),
+		cfg.Origin,
+		cfg.Label,
+		strings.Join(cfg.Arch, ", "),
+		strings.Join(cfg.Components, ", "),
+		cfg.Path,
+		cfg.Merge.String(),
+		cfg.Server,
+	)
+	return err
+}
+
+// MirrorConfig returns the one normalized mirror config record in this DB.
+func (s *Store) MirrorConfig() (config.Mirror, error) {
+	return scanMirrorConfig(s.db.QueryRow(`
 SELECT name, url, dist, release, origin, label, arch, components, path, merge, server
 FROM mirror
 LIMIT 1
-`).Scan(
+`))
+}
+
+// MirrorConfig returns the one normalized mirror config record in this transaction.
+func (tx *Tx) MirrorConfig() (config.Mirror, error) {
+	return scanMirrorConfig(tx.tx.QueryRow(`
+SELECT name, url, dist, release, origin, label, arch, components, path, merge, server
+FROM mirror
+LIMIT 1
+`))
+}
+
+func scanMirrorConfig(row interface {
+	Scan(dest ...interface{}) error
+}) (config.Mirror, error) {
+	var values config.Values
+	var mergeValue string
+	err := row.Scan(
 		&values.Name,
 		&values.URL,
 		&values.Dist,
@@ -39,7 +101,7 @@ LIMIT 1
 		&values.Server,
 	)
 	if err != nil {
-		return config.Mirror{}, fmt.Errorf("load mirror config from %s: %w", dbPath, err)
+		return config.Mirror{}, err
 	}
 
 	merge, err := config.ParseMerge(mergeValue)
@@ -53,4 +115,397 @@ LIMIT 1
 		return config.Mirror{}, err
 	}
 	return cfg, nil
+}
+
+// UpsertPackage inserts or updates one package record.
+func (s *Store) UpsertPackage(pkg PackageRecord) (string, error) {
+	var key string
+	err := s.WithTx(func(tx *Tx) error {
+		var err error
+		key, err = tx.UpsertPackage(pkg)
+		return err
+	})
+	return key, err
+}
+
+// UpsertPackage inserts or updates one package record.
+func (tx *Tx) UpsertPackage(pkg PackageRecord) (string, error) {
+	key, err := normalizePackageKey(pkg)
+	if err != nil {
+		return "", err
+	}
+	_, err = tx.tx.Exec(`
+INSERT INTO packages (
+	package_key, name, version, architecture, filename, component, source, size,
+	md5, sha1, sha256, sha512, pool_path, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(package_key) DO UPDATE SET
+	name = excluded.name,
+	version = excluded.version,
+	architecture = excluded.architecture,
+	filename = excluded.filename,
+	component = excluded.component,
+	source = excluded.source,
+	size = excluded.size,
+	md5 = excluded.md5,
+	sha1 = excluded.sha1,
+	sha256 = excluded.sha256,
+	sha512 = excluded.sha512,
+	pool_path = excluded.pool_path,
+	updated_at = excluded.updated_at
+`,
+		key,
+		pkg.Name,
+		pkg.Version,
+		pkg.Architecture,
+		pkg.Filename,
+		pkg.Component,
+		pkg.Source,
+		pkg.Size,
+		pkg.MD5,
+		pkg.SHA1,
+		pkg.SHA256,
+		pkg.SHA512,
+		pkg.PoolPath,
+		nowString(time.Now()),
+	)
+	if err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+// Package returns one package record by key.
+func (s *Store) Package(key string) (PackageRecord, error) {
+	return scanPackage(s.db.QueryRow(`
+SELECT package_key, name, version, architecture, filename, component, source, size,
+       md5, sha1, sha256, sha512, pool_path
+FROM packages
+WHERE package_key = ?
+`, key))
+}
+
+// ReplaceMirrorPackages replaces the current upstream package membership set.
+func (s *Store) ReplaceMirrorPackages(packageKeys []string) error {
+	return s.WithTx(func(tx *Tx) error {
+		return tx.ReplaceMirrorPackages(packageKeys)
+	})
+}
+
+// ReplaceMirrorPackages replaces the current upstream package membership set.
+func (tx *Tx) ReplaceMirrorPackages(packageKeys []string) error {
+	if _, err := tx.tx.Exec(`DELETE FROM mirror_packages`); err != nil {
+		return err
+	}
+	for _, key := range uniqueNonEmpty(packageKeys) {
+		if _, err := tx.tx.Exec(`INSERT INTO mirror_packages(package_key) VALUES (?)`, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MirrorPackageKeys returns the current mirror package membership set.
+func (s *Store) MirrorPackageKeys() ([]string, error) {
+	return queryStrings(s.db.Query(`SELECT package_key FROM mirror_packages ORDER BY package_key`))
+}
+
+// CreateSnapshot records an immutable snapshot and its package membership.
+func (s *Store) CreateSnapshot(snapshot SnapshotRecord, packageKeys []string) error {
+	return s.WithTx(func(tx *Tx) error {
+		return tx.CreateSnapshot(snapshot, packageKeys)
+	})
+}
+
+// CreateSnapshot records an immutable snapshot and its package membership.
+func (tx *Tx) CreateSnapshot(snapshot SnapshotRecord, packageKeys []string) error {
+	name := strings.TrimSpace(snapshot.Name)
+	if name == "" {
+		return fmt.Errorf("snapshot name is required")
+	}
+	kind := strings.TrimSpace(snapshot.Kind)
+	if kind == "" {
+		kind = "regular"
+	}
+	createdAt := snapshot.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+
+	result, err := tx.tx.Exec(
+		`INSERT OR IGNORE INTO snapshots(name, kind, created_at) VALUES (?, ?, ?)`,
+		name,
+		kind,
+		nowString(createdAt),
+	)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return fmt.Errorf("snapshot %q already exists", name)
+	}
+
+	for _, key := range uniqueNonEmpty(packageKeys) {
+		if _, err := tx.tx.Exec(
+			`INSERT INTO snapshot_packages(snapshot_name, package_key) VALUES (?, ?)`,
+			name,
+			key,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SnapshotPackageKeys returns package membership for a snapshot.
+func (s *Store) SnapshotPackageKeys(snapshotName string) ([]string, error) {
+	return queryStrings(s.db.Query(`
+SELECT package_key
+FROM snapshot_packages
+WHERE snapshot_name = ?
+ORDER BY package_key
+`, snapshotName))
+}
+
+// Snapshot returns one snapshot record by name.
+func (s *Store) Snapshot(name string) (SnapshotRecord, error) {
+	var record SnapshotRecord
+	var createdAt string
+	err := s.db.QueryRow(
+		`SELECT name, kind, created_at FROM snapshots WHERE name = ?`,
+		name,
+	).Scan(&record.Name, &record.Kind, &createdAt)
+	if err != nil {
+		return SnapshotRecord{}, err
+	}
+	record.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return SnapshotRecord{}, err
+	}
+	return record, nil
+}
+
+// SetPublished replaces the currently published state.
+func (s *Store) SetPublished(record PublishedRecord) error {
+	return s.WithTx(func(tx *Tx) error {
+		return tx.SetPublished(record)
+	})
+}
+
+// SetPublished replaces the currently published state.
+func (tx *Tx) SetPublished(record PublishedRecord) error {
+	if strings.TrimSpace(record.SnapshotName) == "" {
+		return fmt.Errorf("published snapshot name is required")
+	}
+	publishedAt := record.PublishedAt
+	if publishedAt.IsZero() {
+		publishedAt = time.Now()
+	}
+	hidden := 0
+	if record.Hidden {
+		hidden = 1
+	}
+
+	_, err := tx.tx.Exec(`
+INSERT INTO published (id, snapshot_name, path, suite, component, published_at, hidden)
+VALUES (1, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	snapshot_name = excluded.snapshot_name,
+	path = excluded.path,
+	suite = excluded.suite,
+	component = excluded.component,
+	published_at = excluded.published_at,
+	hidden = excluded.hidden
+`,
+		record.SnapshotName,
+		record.Path,
+		record.Suite,
+		record.Component,
+		nowString(publishedAt),
+		hidden,
+	)
+	return err
+}
+
+// Published returns the current published state.
+func (s *Store) Published() (PublishedRecord, error) {
+	var record PublishedRecord
+	var publishedAt string
+	var hidden int
+	err := s.db.QueryRow(`
+SELECT snapshot_name, path, suite, component, published_at, hidden
+FROM published
+WHERE id = 1
+`).Scan(
+		&record.SnapshotName,
+		&record.Path,
+		&record.Suite,
+		&record.Component,
+		&publishedAt,
+		&hidden,
+	)
+	if err != nil {
+		return PublishedRecord{}, err
+	}
+	record.PublishedAt, err = parseTime(publishedAt)
+	if err != nil {
+		return PublishedRecord{}, err
+	}
+	record.Hidden = hidden != 0
+	return record, nil
+}
+
+// RecordUpdateHistory inserts one workflow history record.
+func (s *Store) RecordUpdateHistory(record UpdateRecord) (int64, error) {
+	var id int64
+	err := s.WithTx(func(tx *Tx) error {
+		var err error
+		id, err = tx.RecordUpdateHistory(record)
+		return err
+	})
+	return id, err
+}
+
+// RecordUpdateHistory inserts one workflow history record.
+func (tx *Tx) RecordUpdateHistory(record UpdateRecord) (int64, error) {
+	startedAt := record.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	finishedAt := record.FinishedAt
+	if finishedAt.IsZero() {
+		finishedAt = startedAt
+	}
+
+	result, err := tx.tx.Exec(`
+INSERT INTO update_history(action, status, message, started_at, finished_at)
+VALUES (?, ?, ?, ?, ?)
+`, record.Action, record.Status, record.Message, nowString(startedAt), nowString(finishedAt))
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// UpsertUpstreamIndex inserts or updates metadata fetched from upstream.
+func (s *Store) UpsertUpstreamIndex(record UpstreamIndexRecord) error {
+	return s.WithTx(func(tx *Tx) error {
+		return tx.UpsertUpstreamIndex(record)
+	})
+}
+
+// UpsertUpstreamIndex inserts or updates metadata fetched from upstream.
+func (tx *Tx) UpsertUpstreamIndex(record UpstreamIndexRecord) error {
+	if strings.TrimSpace(record.Path) == "" {
+		return fmt.Errorf("upstream index path is required")
+	}
+	fetchedAt := record.FetchedAt
+	if fetchedAt.IsZero() {
+		fetchedAt = time.Now()
+	}
+
+	_, err := tx.tx.Exec(`
+INSERT INTO upstream_indexes(path, size, md5, sha1, sha256, sha512, fetched_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(path) DO UPDATE SET
+	size = excluded.size,
+	md5 = excluded.md5,
+	sha1 = excluded.sha1,
+	sha256 = excluded.sha256,
+	sha512 = excluded.sha512,
+	fetched_at = excluded.fetched_at
+`, record.Path, record.Size, record.MD5, record.SHA1, record.SHA256, record.SHA512, nowString(fetchedAt))
+	return err
+}
+
+func scanPackage(row interface {
+	Scan(dest ...interface{}) error
+}) (PackageRecord, error) {
+	var pkg PackageRecord
+	err := row.Scan(
+		&pkg.Key,
+		&pkg.Name,
+		&pkg.Version,
+		&pkg.Architecture,
+		&pkg.Filename,
+		&pkg.Component,
+		&pkg.Source,
+		&pkg.Size,
+		&pkg.MD5,
+		&pkg.SHA1,
+		&pkg.SHA256,
+		&pkg.SHA512,
+		&pkg.PoolPath,
+	)
+	return pkg, err
+}
+
+func normalizePackageKey(pkg PackageRecord) (string, error) {
+	key := strings.TrimSpace(pkg.Key)
+	if key != "" {
+		return key, nil
+	}
+	if strings.TrimSpace(pkg.Name) == "" {
+		return "", fmt.Errorf("package name is required")
+	}
+	if strings.TrimSpace(pkg.Version) == "" {
+		return "", fmt.Errorf("package version is required")
+	}
+	if strings.TrimSpace(pkg.Architecture) == "" {
+		return "", fmt.Errorf("package architecture is required")
+	}
+	hash := firstNonEmpty(pkg.SHA256, pkg.SHA512, pkg.SHA1, pkg.MD5, pkg.PoolPath)
+	if hash == "" {
+		return "", fmt.Errorf("package checksum or pool path is required")
+	}
+	return strings.Join([]string{pkg.Name, pkg.Version, pkg.Architecture, hash}, "\x1f"), nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func uniqueNonEmpty(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func queryStrings(rows *sql.Rows, err error) ([]string, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var values []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
 }

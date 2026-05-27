@@ -11,7 +11,7 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 5: Package Pool
+Phase 6: State Store (Snapshots, Package Membership, Published State)
 ```
 
 Implemented packages and behavior:
@@ -40,11 +40,21 @@ Implemented packages and behavior:
   - existing package verification
   - disk usage reporting
   - guarded package removal when reference data is provided
+- SQLite state support in `internal/state`:
+  - automatic per-mirror DB creation and schema migrations
+  - mirror config persistence
+  - package metadata upsert
+  - current mirror package membership replacement
+  - immutable snapshot records and snapshot package membership
+  - published state switching
+  - update history records
+  - cleanup reference queries
+  - transaction helpers for multi-table workflow updates
 
 Next target:
 
 ```text
-Phase 6: State Store (Snapshots, Package Membership, Published State)
+Phase 7: Mirror Service
 ```
 
 ## Available Actions
@@ -63,6 +73,9 @@ mirror config show -n|--name <mirror_name>
 ```text
 ~/.mirrors/db/<mirror_name>.sqlite
 ```
+
+New DB files are created automatically when the state package opens a mirror
+database.
 
 End-to-end mirror workflows such as `create`, `fetch`, `update`, `rollback`,
 `hide`, and `cleanup` are not wired yet. They report the planned phase:
@@ -101,106 +114,3 @@ mirror list
 mirror info [-n|--name <mirror_name> | -c|--config <config_file>] [-s|--snapshot <snapshot_id>]
 mirror more-info ...
 ```
-
-Rules:
-
-- `--URL` remains uppercase by design.
-- `-c` always means `--config`.
-- `-d` always means `--date`.
-- Cleanup only removes data when `--remove` is provided.
-
-## Config Format
-
-Configs use an INI-style `[mirror]` section:
-
-```ini
-[mirror]
-name = asterisk16-bionic
-url = http://ppa.launchpad.net/jan-hoffmann/asterisk16/ubuntu/
-dist = bionic
-release = default
-origin = default
-label = default
-arch = amd64, arm64, i386
-components = main
-path = asterisk16-bionic
-merge = yes
-server = http://my-mirrors.com/
-```
-
-Important fields:
-
-- `name`: mirror name or prefix.
-- `url`: upstream apt repository URL.
-- `dist`: distribution or suite, such as `focal` or `jammy`.
-- `release`: release pocket, usually `default`.
-- `origin` and `label`: values from Release/InRelease, or `default`.
-- `arch`: comma-separated architectures.
-- `components`: comma-separated components.
-- `path`: local/published path name.
-- `merge`: optional snapshot merge setting: `no`, `0`, `yes`, or a positive number.
-- `server`: optional published mirror URL for generated sources output.
-
-## Build And Test
-
-The project targets Go 1.18.
-
-```bash
-gofmt -w main.go internal
-go test ./...
-go build -buildvcs=false .
-```
-
-Use `-buildvcs=false` when building outside a clean VCS context or when Go
-cannot read repository VCS metadata.
-
-## Local State Layout
-
-The app state layout is:
-
-```text
-~/.mirrors/
-  db/
-    <mirror_name>.sqlite
-  packages/
-```
-
-Each mirror/config gets a separate SQLite database:
-
-```text
-~/.mirrors/db/<mirror_name>.sqlite
-```
-
-Package files are stored under `~/.mirrors/packages/` using a checksum-based
-package pool structure.
-
-## Merge Snapshot Rule
-
-Regular snapshots must represent the exact upstream repository state at update
-time.
-
-Regular snapshot name:
-
-```text
-<mirror>-<dist[-release]>-<component>_<YYYY-MM-DD>
-```
-
-If merge is disabled with `merge = no` or `merge = 0`, publish the regular
-snapshot directly.
-
-If merge is enabled, create the regular upstream snapshot first, then create a
-separate merged snapshot:
-
-```text
-MERGED-<mirror>-<dist[-release]>-<component>_<YYYY-MM-DD>
-```
-
-Merge depth:
-
-- `merge = 1`: latest regular snapshot plus 1 previous regular snapshot.
-- `merge = 2`: latest regular snapshot plus 2 previous regular snapshots.
-- `merge = N`: latest regular snapshot plus N previous regular snapshots.
-- `merge = yes`: latest regular snapshot plus all previous regular snapshots.
-
-When merge is enabled, publish the `MERGED-*` snapshot, not the regular
-snapshot.
