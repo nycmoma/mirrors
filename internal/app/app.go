@@ -126,7 +126,35 @@ func runList(cmd cli.Command) error {
 }
 
 func notImplemented(name string) error {
-	return fmt.Errorf("%s is not implemented yet in Phase 1", name)
+	target, ok := implementationTargets[name]
+	if !ok {
+		target = implementationTarget{Phase: 11, Name: "App Workflows"}
+	}
+
+	return fmt.Errorf("action %q will be implemented in Phase %d: %s.", name, target.Phase, target.Name)
+}
+
+type implementationTarget struct {
+	Phase int
+	Name  string
+}
+
+var implementationTargets = map[string]implementationTarget{
+	"config generate":  {Phase: 11, Name: "App Workflows"},
+	"create":           {Phase: 7, Name: "Mirror Service"},
+	"fetch":            {Phase: 7, Name: "Mirror Service"},
+	"update":           {Phase: 7, Name: "Mirror Service"},
+	"rollback":         {Phase: 8, Name: "Merged Snapshots"},
+	"daily":            {Phase: 11, Name: "App Workflows"},
+	"weekly":           {Phase: 11, Name: "App Workflows"},
+	"monthly":          {Phase: 11, Name: "App Workflows"},
+	"hide":             {Phase: 9, Name: "Publish Service"},
+	"destroy":          {Phase: 7, Name: "Mirror Service"},
+	"cleanup":          {Phase: 11, Name: "App Workflows"},
+	"cleanup --remove": {Phase: 11, Name: "App Workflows"},
+	"info":             {Phase: 7, Name: "Mirror Service"},
+	"more-info":        {Phase: 11, Name: "App Workflows"},
+	"list":             {Phase: 7, Name: "Mirror Service"},
 }
 
 func title(value string) string {

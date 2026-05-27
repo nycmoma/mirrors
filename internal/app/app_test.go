@@ -39,6 +39,18 @@ func TestRunMirrorCommandRequiresIdentity(t *testing.T) {
 	}
 }
 
+func TestNotImplementedReportsPlannedPhase(t *testing.T) {
+	err := notImplemented("create")
+	if err == nil {
+		t.Fatal("expected not implemented error")
+	}
+
+	want := `action "create" will be implemented in Phase 7: Mirror Service.`
+	if err.Error() != want {
+		t.Fatalf("expected %q, got %q", want, err.Error())
+	}
+}
+
 func TestRunConfigShowRejectsAmbiguousIdentity(t *testing.T) {
 	err := runConfig(cli.Command{
 		Name:       "config",
