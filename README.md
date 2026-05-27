@@ -11,7 +11,7 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 4: Download Repository Metadata and Packages
+Phase 5: Package Pool
 ```
 
 Implemented packages and behavior:
@@ -33,11 +33,18 @@ Implemented packages and behavior:
   - size and checksum verification
   - `HEAD` length lookup
   - testable downloader interface
+- Package pool support in `internal/pool`:
+  - checksum-based storage layout under `~/.mirrors/packages/`
+  - package import with size and checksum verification
+  - duplicate package detection
+  - existing package verification
+  - disk usage reporting
+  - guarded package removal when reference data is provided
 
 Next target:
 
 ```text
-Phase 5: Package Pool
+Phase 6: State Store (Snapshots, Package Membership, Published State)
 ```
 
 ## Available Actions
@@ -164,7 +171,7 @@ Each mirror/config gets a separate SQLite database:
 ~/.mirrors/db/<mirror_name>.sqlite
 ```
 
-Package files will be stored under `~/.mirrors/packages/` using the planned
+Package files are stored under `~/.mirrors/packages/` using a checksum-based
 package pool structure.
 
 ## Merge Snapshot Rule
