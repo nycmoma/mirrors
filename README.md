@@ -11,7 +11,7 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 8: Merged Snapshots
+Phase 9: Publish Service
 ```
 
 Implemented packages and behavior:
@@ -44,6 +44,8 @@ Implemented packages and behavior:
   - automatic per-mirror DB creation and schema migrations
   - mirror config persistence
   - package metadata upsert
+  - upstream Release origin/label persistence
+  - upstream package stanza field persistence
   - current mirror package membership replacement
   - dated snapshot records and snapshot package membership
   - published state switching
@@ -66,12 +68,20 @@ Implemented packages and behavior:
   - merge-depth handling for numeric merge settings and merge-all behavior
   - checksum-conflict warnings with newest package selection
   - snapshot listing and `info --snapshot` lookup
-  - rollback snapshot selection without writing published repository files
+  - rollback snapshot selection
+- Unsigned publish support in `internal/publish`:
+  - `Packages` and `Packages.gz` generation from stored upstream stanza data
+  - unsigned `Release` metadata generation
+  - upstream or explicit origin/label selection
+  - home-relative publish paths
+  - package hardlinking from the local package pool with copy fallback
+  - publish switching for create, update, and rollback
+  - hide/unpublish while preserving mirror state, snapshots, and packages
 
 Next target:
 
 ```text
-Phase 9: Publish Service
+Phase 10: Signing
 ```
 
 ## Available Actions
@@ -87,6 +97,7 @@ mirror create -c|--config <config_file>
 mirror fetch -c|--config <config_file>
 mirror update -c|--config <config_file>
 mirror rollback [-n|--name <mirror_name> | -c|--config <config_file>] [-d|--date YYYY-MM-DD | -i|--id <snapshot_id>]
+mirror hide [-n|--name <mirror_name> | -c|--config <config_file>]
 mirror list
 mirror info [-n|--name <mirror_name> | -c|--config <config_file>] [-s|--snapshot <snapshot_id>]
 mirror destroy [-n|--name <mirror_name> | -c|--config <config_file>]
@@ -101,11 +112,12 @@ mirror destroy [-n|--name <mirror_name> | -c|--config <config_file>]
 New DB files are created automatically when the state package opens a mirror
 database.
 
-Published repository generation workflows such as `hide` and `cleanup` are not
-wired yet. They report the planned phase:
+Signing is not wired yet. Phase 9 publishes unsigned repository output:
 
 ```text
-ERROR: action "hide" will be implemented in Phase 9: Publish Service.
+Packages
+Packages.gz
+Release
 ```
 
 ## Usage Examples
@@ -118,6 +130,7 @@ go run . config show -n chrome_stable
 go run . fetch -c ./chrome_stable.conf
 go run . update -c ./chrome_stable.conf
 go run . rollback -n chrome_stable -d 2026-05-27
+go run . hide -n chrome_stable
 go run . list
 go run . info -n chrome_stable
 ```

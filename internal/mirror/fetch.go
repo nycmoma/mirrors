@@ -78,6 +78,15 @@ func (s *Service) Fetch(ctx context.Context, cfg config.Mirror) (FetchResult, er
 				_ = recordFetchFailure(store, startedAt, err)
 				return FetchResult{}, err
 			}
+			if err := store.UpsertUpstreamRelease(state.UpstreamReleaseRecord{
+				Suite:     suite,
+				Origin:    releaseMeta.Origin,
+				Label:     releaseMeta.Label,
+				FetchedAt: time.Now(),
+			}); err != nil {
+				_ = recordFetchFailure(store, startedAt, err)
+				return FetchResult{}, err
+			}
 
 			for _, component := range cfg.Components {
 				if !contains(releaseMeta.Components, component) {
@@ -331,7 +340,16 @@ func packageRecord(pkg debmeta.Package, poolPath string) state.PackageRecord {
 		SHA256:       pkg.Checksums.SHA256,
 		SHA512:       pkg.Checksums.SHA512,
 		PoolPath:     poolPath,
+		Fields:       mapFromStanza(pkg.Fields),
 	}
+}
+
+func mapFromStanza(stanza debmeta.Stanza) map[string]string {
+	fields := map[string]string{}
+	for key, value := range stanza {
+		fields[key] = value
+	}
+	return fields
 }
 
 func validateRelease(release *debmeta.Release, cfg config.Mirror, suite string) error {

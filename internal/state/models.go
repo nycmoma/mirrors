@@ -17,6 +17,7 @@ type PackageRecord struct {
 	SHA256       string
 	SHA512       string
 	PoolPath     string
+	Fields       map[string]string
 }
 
 // SnapshotRecord describes a dated package membership set.
@@ -54,6 +55,14 @@ type UpstreamIndexRecord struct {
 	SHA1      string
 	SHA256    string
 	SHA512    string
+	FetchedAt time.Time
+}
+
+// UpstreamReleaseRecord stores upstream Release metadata needed for publishing.
+type UpstreamReleaseRecord struct {
+	Suite     string
+	Origin    string
+	Label     string
 	FetchedAt time.Time
 }
 

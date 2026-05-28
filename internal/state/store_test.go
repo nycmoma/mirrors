@@ -144,6 +144,23 @@ func TestUpsertPackage(t *testing.T) {
 	}
 }
 
+func TestUpsertPackagePersistsFields(t *testing.T) {
+	store := openTempStore(t)
+	defer closeStore(t, store)
+
+	pkg := testPackage("pkg1", "pool/pkg1.deb")
+	pkg.Fields = map[string]string{"Package": "pkg1", "Priority": "optional"}
+	key := upsertTestPackage(t, store, pkg)
+
+	loaded, err := store.Package(key)
+	if err != nil {
+		t.Fatalf("Package returned error: %v", err)
+	}
+	if loaded.Fields["Priority"] != "optional" {
+		t.Fatalf("package fields were not persisted: %#v", loaded.Fields)
+	}
+}
+
 func TestReplaceMirrorPackages(t *testing.T) {
 	store := openTempStore(t)
 	defer closeStore(t, store)
@@ -213,6 +230,54 @@ func TestReplaceSnapshotReplacesMembership(t *testing.T) {
 	}
 	if !reflect.DeepEqual(keys, []string{key2}) {
 		t.Fatalf("unexpected replacement membership: %#v", keys)
+	}
+}
+
+func TestSnapshotPackagesPreserveCapturedFields(t *testing.T) {
+	store := openTempStore(t)
+	defer closeStore(t, store)
+	pkg := testPackage("pkg1", "pool/pkg1.deb")
+	pkg.Fields = map[string]string{"Package": "pkg1", "Description": "first"}
+	key := upsertTestPackage(t, store, pkg)
+
+	snapshot := SnapshotRecord{Name: "ubuntu-focal-main_2026-05-27", Kind: "regular", CreatedAt: testTime()}
+	if err := store.CreateSnapshot(snapshot, []string{key}); err != nil {
+		t.Fatalf("CreateSnapshot returned error: %v", err)
+	}
+
+	pkg.Fields = map[string]string{"Package": "pkg1", "Description": "changed"}
+	if _, err := store.UpsertPackage(pkg); err != nil {
+		t.Fatalf("second UpsertPackage returned error: %v", err)
+	}
+
+	packages, err := store.SnapshotPackages(snapshot.Name)
+	if err != nil {
+		t.Fatalf("SnapshotPackages returned error: %v", err)
+	}
+	if len(packages) != 1 || packages[0].Fields["Description"] != "first" {
+		t.Fatalf("snapshot fields were not preserved: %#v", packages)
+	}
+}
+
+func TestUpsertUpstreamRelease(t *testing.T) {
+	store := openTempStore(t)
+	defer closeStore(t, store)
+
+	record := UpstreamReleaseRecord{Suite: "focal", Origin: "Ubuntu", Label: "Ubuntu", FetchedAt: testTime()}
+	if err := store.UpsertUpstreamRelease(record); err != nil {
+		t.Fatalf("UpsertUpstreamRelease returned error: %v", err)
+	}
+	record.Label = "Updated"
+	if err := store.UpsertUpstreamRelease(record); err != nil {
+		t.Fatalf("second UpsertUpstreamRelease returned error: %v", err)
+	}
+
+	loaded, err := store.UpstreamRelease("focal")
+	if err != nil {
+		t.Fatalf("UpstreamRelease returned error: %v", err)
+	}
+	if loaded.Origin != "Ubuntu" || loaded.Label != "Updated" {
+		t.Fatalf("unexpected upstream release: %#v", loaded)
 	}
 }
 

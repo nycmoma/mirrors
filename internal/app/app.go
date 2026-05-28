@@ -8,6 +8,7 @@ import (
 	"mirrors/internal/cli"
 	"mirrors/internal/config"
 	"mirrors/internal/mirror"
+	"mirrors/internal/publish"
 	"mirrors/internal/snapshot"
 	"mirrors/internal/state"
 )
@@ -108,12 +109,7 @@ func runConfigDrivenMirrorCommand(cmd cli.Command) error {
 
 	switch cmd.Name {
 	case "create":
-		result, err := service.Create(context.Background(), cfg)
-		if err != nil {
-			return err
-		}
-		printFetchResult("Create", result)
-		return nil
+		return runPublishUpdate("Create", service, cfg)
 	case "fetch":
 		result, err := service.Fetch(context.Background(), cfg)
 		if err != nil {
@@ -122,24 +118,37 @@ func runConfigDrivenMirrorCommand(cmd cli.Command) error {
 		printFetchResult("Fetch", result)
 		return nil
 	case "update":
-		fetchResult, err := service.Fetch(context.Background(), cfg)
-		if err != nil {
-			return err
-		}
-		snapshotService, err := snapshot.NewService()
-		if err != nil {
-			return err
-		}
-		updateResult, err := snapshotService.CreateCurrent(cfg)
-		if err != nil {
-			return err
-		}
-		printFetchResult("Update fetch", fetchResult)
-		printUpdateResult(updateResult)
-		return nil
+		return runPublishUpdate("Update", service, cfg)
 	default:
 		return notImplemented(cmd.Name)
 	}
+}
+
+func runPublishUpdate(action string, mirrorService *mirror.Service, cfg config.Mirror) error {
+	fetchResult, err := mirrorService.Fetch(context.Background(), cfg)
+	if err != nil {
+		return err
+	}
+	snapshotService, err := snapshot.NewService()
+	if err != nil {
+		return err
+	}
+	updateResult, err := snapshotService.CreateCurrent(cfg)
+	if err != nil {
+		return err
+	}
+	publishService, err := publish.NewService()
+	if err != nil {
+		return err
+	}
+	publishResult, err := publishService.PublishSelected(cfg)
+	if err != nil {
+		return err
+	}
+	printFetchResult(action+" fetch", fetchResult)
+	printUpdateResult(updateResult)
+	printPublishResult(publishResult)
+	return nil
 }
 
 func runMirrorCommand(cmd cli.Command) error {
@@ -168,6 +177,19 @@ func runMirrorCommand(cmd cli.Command) error {
 			return err
 		}
 		printRollbackResult(result)
+		cfg, err := configForMirrorCommand(cmd, name)
+		if err != nil {
+			return err
+		}
+		publishService, err := publish.NewService()
+		if err != nil {
+			return err
+		}
+		publishResult, err := publishService.PublishSelected(cfg)
+		if err != nil {
+			return err
+		}
+		printPublishResult(publishResult)
 		return nil
 	case "info":
 		summary, err := service.Info(name)
@@ -198,6 +220,17 @@ func runMirrorCommand(cmd cli.Command) error {
 			return err
 		}
 		fmt.Printf("Destroyed mirror %q\n", name)
+		return nil
+	case "hide":
+		publishService, err := publish.NewService()
+		if err != nil {
+			return err
+		}
+		result, err := publishService.Hide(name)
+		if err != nil {
+			return err
+		}
+		printPublishResult(result)
 		return nil
 	}
 	if cmd.Name == "cleanup" && cmd.Remove {
@@ -247,7 +280,6 @@ var implementationTargets = map[string]implementationTarget{
 	"daily":            {Phase: 11, Name: "App Workflows"},
 	"weekly":           {Phase: 11, Name: "App Workflows"},
 	"monthly":          {Phase: 11, Name: "App Workflows"},
-	"hide":             {Phase: 9, Name: "Publish Service"},
 	"cleanup":          {Phase: 11, Name: "App Workflows"},
 	"cleanup --remove": {Phase: 11, Name: "App Workflows"},
 	"more-info":        {Phase: 11, Name: "App Workflows"},
@@ -272,6 +304,20 @@ func mirrorNameFromCommand(cmd cli.Command) (string, error) {
 		return "", err
 	}
 	return cfg.Name, nil
+}
+
+func configForMirrorCommand(cmd cli.Command, name string) (config.Mirror, error) {
+	if cmd.ConfigPath != "" {
+		cfg, err := config.Load(cmd.ConfigPath)
+		if err != nil {
+			return config.Mirror{}, err
+		}
+		if err := config.Validate(cfg); err != nil {
+			return config.Mirror{}, err
+		}
+		return cfg, nil
+	}
+	return state.LoadMirrorConfig(config.DBPath(name))
 }
 
 func printFetchResult(action string, result mirror.FetchResult) {
@@ -318,7 +364,6 @@ func printUpdateResult(result snapshot.UpdateResult) {
 		fmt.Printf("WARNING: %s\n", warning)
 	}
 	fmt.Printf("Selected snapshot: %s\n", result.SelectedSnapshot)
-	fmt.Println("Published repository files are not generated in Phase 8.")
 }
 
 func printRollbackResult(result snapshot.RollbackResult) {
@@ -328,7 +373,21 @@ func printRollbackResult(result snapshot.RollbackResult) {
 	if len(result.ResolvedSnapshots) > 1 {
 		fmt.Printf("Resolved snapshot group: %s\n", strings.Join(result.ResolvedSnapshots, ", "))
 	}
-	fmt.Println("Published repository files are not generated in Phase 8.")
+}
+
+func printPublishResult(result publish.Result) {
+	if result.Hidden {
+		fmt.Printf("Published output hidden for mirror %q\n", result.MirrorName)
+		fmt.Printf("Path: %s\n", result.Path)
+		return
+	}
+	fmt.Printf("Published unsigned repository for mirror %q\n", result.MirrorName)
+	fmt.Printf("Path: %s\n", result.Path)
+	fmt.Printf("Suite: %s\n", result.Suite)
+	fmt.Printf("Snapshots: %s\n", strings.Join(result.Snapshots, ", "))
+	fmt.Printf("Packages: %d\n", result.Packages)
+	fmt.Printf("Indexes: %d\n", result.Indexes)
+	fmt.Println("Signing is not implemented until Phase 10.")
 }
 
 func printSnapshotList(snapshots []snapshot.Summary) {

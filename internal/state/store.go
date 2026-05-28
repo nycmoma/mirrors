@@ -2,6 +2,7 @@ package state
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -135,11 +136,15 @@ func (tx *Tx) UpsertPackage(pkg PackageRecord) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	fieldsJSON, err := encodeFields(pkg.Fields)
+	if err != nil {
+		return "", err
+	}
 	_, err = tx.tx.Exec(`
 INSERT INTO packages (
 	package_key, name, version, architecture, filename, component, source, size,
-	md5, sha1, sha256, sha512, pool_path, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	md5, sha1, sha256, sha512, pool_path, fields_json, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(package_key) DO UPDATE SET
 	name = excluded.name,
 	version = excluded.version,
@@ -153,6 +158,7 @@ ON CONFLICT(package_key) DO UPDATE SET
 	sha256 = excluded.sha256,
 	sha512 = excluded.sha512,
 	pool_path = excluded.pool_path,
+	fields_json = excluded.fields_json,
 	updated_at = excluded.updated_at
 `,
 		key,
@@ -168,6 +174,7 @@ ON CONFLICT(package_key) DO UPDATE SET
 		pkg.SHA256,
 		pkg.SHA512,
 		pkg.PoolPath,
+		fieldsJSON,
 		nowString(time.Now()),
 	)
 	if err != nil {
@@ -180,7 +187,7 @@ ON CONFLICT(package_key) DO UPDATE SET
 func (s *Store) Package(key string) (PackageRecord, error) {
 	return scanPackage(s.db.QueryRow(`
 SELECT package_key, name, version, architecture, filename, component, source, size,
-       md5, sha1, sha256, sha512, pool_path
+       md5, sha1, sha256, sha512, pool_path, fields_json
 FROM packages
 WHERE package_key = ?
 `, key))
@@ -195,6 +202,37 @@ func (s *Store) Packages(keys []string) ([]PackageRecord, error) {
 			return nil, err
 		}
 		records = append(records, record)
+	}
+	return records, nil
+}
+
+// SnapshotPackages returns package records and stanza fields captured for a snapshot.
+func (s *Store) SnapshotPackages(snapshotName string) ([]PackageRecord, error) {
+	rows, err := s.db.Query(`
+SELECT p.package_key, p.name, p.version, p.architecture, p.filename, p.component, p.source, p.size,
+       p.md5, p.sha1, p.sha256, p.sha512, p.pool_path, sp.fields_json
+FROM snapshot_packages sp
+JOIN packages p ON p.package_key = sp.package_key
+WHERE sp.snapshot_name = ?
+ORDER BY p.name, p.version, p.architecture, p.filename
+`, snapshotName)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var records []PackageRecord
+	for rows.Next() {
+		record, err := scanPackage(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return records, nil
 }
@@ -298,14 +336,8 @@ func (tx *Tx) CreateSnapshot(snapshot SnapshotRecord, packageKeys []string) erro
 		return fmt.Errorf("snapshot %q already exists", name)
 	}
 
-	for _, key := range uniqueNonEmpty(packageKeys) {
-		if _, err := tx.tx.Exec(
-			`INSERT INTO snapshot_packages(snapshot_name, package_key) VALUES (?, ?)`,
-			name,
-			key,
-		); err != nil {
-			return err
-		}
+	if err := tx.insertSnapshotPackages(name, packageKeys); err != nil {
+		return err
 	}
 	return nil
 }
@@ -331,24 +363,94 @@ func (tx *Tx) ReplaceSnapshot(snapshot SnapshotRecord, packageKeys []string) err
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
-	if _, err := tx.tx.Exec(
+	result, err := tx.tx.Exec(
 		`UPDATE snapshots SET kind = ?, created_at = ? WHERE name = ?`,
 		kind,
 		nowString(createdAt),
 		name,
-	); err != nil {
+	)
+	if err != nil {
 		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		if _, err := tx.tx.Exec(
+			`INSERT INTO snapshots(name, kind, created_at) VALUES (?, ?, ?)`,
+			name,
+			kind,
+			nowString(createdAt),
+		); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.tx.Exec(`DELETE FROM snapshot_packages WHERE snapshot_name = ?`, name); err != nil {
 		return err
 	}
-	for _, key := range uniqueNonEmpty(packageKeys) {
+	if err := tx.insertSnapshotPackages(name, packageKeys); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ReplaceSnapshotPackages replaces a snapshot using explicit package records.
+func (s *Store) ReplaceSnapshotPackages(snapshot SnapshotRecord, packages []PackageRecord) error {
+	return s.WithTx(func(tx *Tx) error {
+		return tx.ReplaceSnapshotPackages(snapshot, packages)
+	})
+}
+
+// ReplaceSnapshotPackages replaces a snapshot using explicit package records.
+func (tx *Tx) ReplaceSnapshotPackages(snapshot SnapshotRecord, packages []PackageRecord) error {
+	keys := make([]string, 0, len(packages))
+	fieldsByKey := map[string]map[string]string{}
+	for _, pkg := range packages {
+		key, err := normalizePackageKey(pkg)
+		if err != nil {
+			return err
+		}
+		keys = append(keys, key)
+		fieldsByKey[key] = pkg.Fields
+	}
+	if err := tx.ReplaceSnapshot(snapshot, keys); err != nil {
+		return err
+	}
+	for _, key := range uniqueNonEmpty(keys) {
+		fieldsJSON, err := encodeFields(fieldsByKey[key])
+		if err != nil {
+			return err
+		}
 		if _, err := tx.tx.Exec(
-			`INSERT INTO snapshot_packages(snapshot_name, package_key) VALUES (?, ?)`,
-			name,
+			`UPDATE snapshot_packages SET fields_json = ? WHERE snapshot_name = ? AND package_key = ?`,
+			fieldsJSON,
+			strings.TrimSpace(snapshot.Name),
 			key,
 		); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (tx *Tx) insertSnapshotPackages(snapshotName string, packageKeys []string) error {
+	for _, key := range uniqueNonEmpty(packageKeys) {
+		result, err := tx.tx.Exec(
+			`INSERT INTO snapshot_packages(snapshot_name, package_key, fields_json)
+SELECT ?, package_key, fields_json FROM packages WHERE package_key = ?`,
+			snapshotName,
+			key,
+		)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return fmt.Errorf("package %q does not exist", key)
 		}
 	}
 	return nil
@@ -581,10 +683,57 @@ ON CONFLICT(path) DO UPDATE SET
 	return err
 }
 
+// UpsertUpstreamRelease inserts or updates upstream Release metadata.
+func (s *Store) UpsertUpstreamRelease(record UpstreamReleaseRecord) error {
+	return s.WithTx(func(tx *Tx) error {
+		return tx.UpsertUpstreamRelease(record)
+	})
+}
+
+// UpsertUpstreamRelease inserts or updates upstream Release metadata.
+func (tx *Tx) UpsertUpstreamRelease(record UpstreamReleaseRecord) error {
+	if strings.TrimSpace(record.Suite) == "" {
+		return fmt.Errorf("upstream release suite is required")
+	}
+	fetchedAt := record.FetchedAt
+	if fetchedAt.IsZero() {
+		fetchedAt = time.Now()
+	}
+	_, err := tx.tx.Exec(`
+INSERT INTO upstream_releases(suite, origin, label, fetched_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(suite) DO UPDATE SET
+	origin = excluded.origin,
+	label = excluded.label,
+	fetched_at = excluded.fetched_at
+`, record.Suite, record.Origin, record.Label, nowString(fetchedAt))
+	return err
+}
+
+// UpstreamRelease returns upstream Release metadata for a suite.
+func (s *Store) UpstreamRelease(suite string) (UpstreamReleaseRecord, error) {
+	var record UpstreamReleaseRecord
+	var fetchedAt string
+	err := s.db.QueryRow(`
+SELECT suite, origin, label, fetched_at
+FROM upstream_releases
+WHERE suite = ?
+`, suite).Scan(&record.Suite, &record.Origin, &record.Label, &fetchedAt)
+	if err != nil {
+		return UpstreamReleaseRecord{}, err
+	}
+	record.FetchedAt, err = parseTime(fetchedAt)
+	if err != nil {
+		return UpstreamReleaseRecord{}, err
+	}
+	return record, nil
+}
+
 func scanPackage(row interface {
 	Scan(dest ...interface{}) error
 }) (PackageRecord, error) {
 	var pkg PackageRecord
+	var fieldsJSON string
 	err := row.Scan(
 		&pkg.Key,
 		&pkg.Name,
@@ -599,7 +748,12 @@ func scanPackage(row interface {
 		&pkg.SHA256,
 		&pkg.SHA512,
 		&pkg.PoolPath,
+		&fieldsJSON,
 	)
+	if err != nil {
+		return pkg, err
+	}
+	pkg.Fields, err = decodeFields(fieldsJSON)
 	return pkg, err
 }
 
@@ -671,4 +825,29 @@ func queryStrings(rows *sql.Rows, err error) ([]string, error) {
 
 func isNoRows(err error) bool {
 	return errors.Is(err, sql.ErrNoRows)
+}
+
+func encodeFields(fields map[string]string) (string, error) {
+	if len(fields) == 0 {
+		return "{}", nil
+	}
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func decodeFields(value string) (map[string]string, error) {
+	if strings.TrimSpace(value) == "" {
+		return map[string]string{}, nil
+	}
+	var fields map[string]string
+	if err := json.Unmarshal([]byte(value), &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		fields = map[string]string{}
+	}
+	return fields, nil
 }

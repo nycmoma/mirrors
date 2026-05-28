@@ -143,24 +143,24 @@ func (s *Service) CreateCurrent(cfg config.Mirror) (UpdateResult, error) {
 		selected = regularName
 
 		if cfg.Merge.Enabled {
-			mergedKeys, warnings, err := s.mergedPackageKeys(store, target.ComponentMirrorName, cfg.Merge)
+			mergedPackages, warnings, err := s.mergedPackages(store, target.ComponentMirrorName, cfg.Merge)
 			if err != nil {
 				return UpdateResult{}, err
 			}
 			result.Warnings = append(result.Warnings, warnings...)
 			mergedName := mirror.MergedSnapshotName(target.ComponentMirrorName, date)
-			regenerated, err := s.createOrRegenerate(store, state.SnapshotRecord{
+			regenerated, err := s.createOrRegeneratePackages(store, state.SnapshotRecord{
 				Name:      mergedName,
 				Kind:      kindMerged,
 				CreatedAt: now,
-			}, mergedKeys, date)
+			}, mergedPackages, date)
 			if err != nil {
 				return UpdateResult{}, err
 			}
 			result.Snapshots = append(result.Snapshots, SnapshotResult{
 				Name:         mergedName,
 				Kind:         kindMerged,
-				PackageCount: len(mergedKeys),
+				PackageCount: len(mergedPackages),
 				Regenerated:  regenerated,
 			})
 			selected = mergedName
@@ -303,6 +303,24 @@ func (s *Service) createOrRegenerate(store *state.Store, snapshot state.Snapshot
 	return true, store.ReplaceSnapshot(snapshot, packageKeys)
 }
 
+func (s *Service) createOrRegeneratePackages(store *state.Store, snapshot state.SnapshotRecord, packages []state.PackageRecord, today string) (bool, error) {
+	existing, err := store.Snapshot(snapshot.Name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, store.ReplaceSnapshotPackages(snapshot, packages)
+		}
+		return false, err
+	}
+	existingDate, err := dateFromSnapshotName(existing.Name)
+	if err != nil {
+		return false, err
+	}
+	if existingDate != today {
+		return false, fmt.Errorf("snapshot %q is immutable because local date %s has passed", existing.Name, existingDate)
+	}
+	return true, store.ReplaceSnapshotPackages(snapshot, packages)
+}
+
 func snapshotSummaries(store *state.Store, snapshots []state.SnapshotRecord) ([]Summary, error) {
 	var summaries []Summary
 	for _, record := range snapshots {
@@ -318,7 +336,7 @@ func snapshotSummaries(store *state.Store, snapshots []state.SnapshotRecord) ([]
 	return summaries, nil
 }
 
-func (s *Service) mergedPackageKeys(store *state.Store, componentMirrorName string, merge config.Merge) ([]string, []string, error) {
+func (s *Service) mergedPackages(store *state.Store, componentMirrorName string, merge config.Merge) ([]state.PackageRecord, []string, error) {
 	inputs, err := regularSnapshotsFor(store, componentMirrorName)
 	if err != nil {
 		return nil, nil, err
@@ -334,15 +352,11 @@ func (s *Service) mergedPackageKeys(store *state.Store, componentMirrorName stri
 
 	selectedByIdentity := map[string]string{}
 	selectedKeys := map[string]bool{}
+	selectedPackages := map[string]state.PackageRecord{}
 	warned := map[string]bool{}
-	var keys []string
 	var warnings []string
 	for _, snapshot := range inputs {
-		snapshotKeys, err := store.SnapshotPackageKeys(snapshot.Name)
-		if err != nil {
-			return nil, nil, err
-		}
-		packages, err := store.Packages(snapshotKeys)
+		packages, err := store.SnapshotPackages(snapshot.Name)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -360,11 +374,19 @@ func (s *Service) mergedPackageKeys(store *state.Store, componentMirrorName stri
 			}
 			selectedByIdentity[identity] = pkg.Key
 			selectedKeys[pkg.Key] = true
-			keys = append(keys, pkg.Key)
+			selectedPackages[pkg.Key] = pkg
 		}
 	}
+	var keys []string
+	for key := range selectedPackages {
+		keys = append(keys, key)
+	}
 	sort.Strings(keys)
-	return keys, warnings, nil
+	packages := make([]state.PackageRecord, 0, len(keys))
+	for _, key := range keys {
+		packages = append(packages, selectedPackages[key])
+	}
+	return packages, warnings, nil
 }
 
 func (s *Service) resolveRollbackTargets(store *state.Store, cfg config.Mirror, rawDate, rawID string) ([]string, error) {

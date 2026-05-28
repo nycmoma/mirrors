@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const latestSchemaVersion = 1
+const latestSchemaVersion = 2
 
 type migration struct {
 	version int
@@ -113,6 +113,20 @@ CREATE INDEX IF NOT EXISTS packages_pool_path_idx ON packages(pool_path);
 CREATE INDEX IF NOT EXISTS packages_identity_idx ON packages(name, version, architecture);
 CREATE INDEX IF NOT EXISTS snapshot_packages_package_idx ON snapshot_packages(package_key);
 CREATE INDEX IF NOT EXISTS cleanup_refs_pool_path_idx ON cleanup_refs(pool_path);
+`,
+	},
+	{
+		version: 2,
+		sql: `
+ALTER TABLE packages ADD COLUMN fields_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE snapshot_packages ADD COLUMN fields_json TEXT NOT NULL DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS upstream_releases (
+	suite TEXT PRIMARY KEY,
+	origin TEXT NOT NULL,
+	label TEXT NOT NULL,
+	fetched_at TEXT NOT NULL
+);
 `,
 	},
 }
