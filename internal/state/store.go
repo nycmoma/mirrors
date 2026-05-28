@@ -186,6 +186,19 @@ WHERE package_key = ?
 `, key))
 }
 
+// Packages returns package records for the provided package keys.
+func (s *Store) Packages(keys []string) ([]PackageRecord, error) {
+	var records []PackageRecord
+	for _, key := range uniqueNonEmpty(keys) {
+		record, err := s.Package(key)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
 // PackageKey returns the state identity key for a package record.
 func PackageKey(pkg PackageRecord) (string, error) {
 	return normalizePackageKey(pkg)
@@ -246,14 +259,14 @@ func (s *Store) Stats() (Stats, error) {
 	return stats, nil
 }
 
-// CreateSnapshot records an immutable snapshot and its package membership.
+// CreateSnapshot records a snapshot and its package membership.
 func (s *Store) CreateSnapshot(snapshot SnapshotRecord, packageKeys []string) error {
 	return s.WithTx(func(tx *Tx) error {
 		return tx.CreateSnapshot(snapshot, packageKeys)
 	})
 }
 
-// CreateSnapshot records an immutable snapshot and its package membership.
+// CreateSnapshot records a snapshot and its package membership.
 func (tx *Tx) CreateSnapshot(snapshot SnapshotRecord, packageKeys []string) error {
 	name := strings.TrimSpace(snapshot.Name)
 	if name == "" {
@@ -297,6 +310,50 @@ func (tx *Tx) CreateSnapshot(snapshot SnapshotRecord, packageKeys []string) erro
 	return nil
 }
 
+// ReplaceSnapshot replaces a snapshot record and its package membership.
+func (s *Store) ReplaceSnapshot(snapshot SnapshotRecord, packageKeys []string) error {
+	return s.WithTx(func(tx *Tx) error {
+		return tx.ReplaceSnapshot(snapshot, packageKeys)
+	})
+}
+
+// ReplaceSnapshot replaces a snapshot record and its package membership.
+func (tx *Tx) ReplaceSnapshot(snapshot SnapshotRecord, packageKeys []string) error {
+	name := strings.TrimSpace(snapshot.Name)
+	if name == "" {
+		return fmt.Errorf("snapshot name is required")
+	}
+	kind := strings.TrimSpace(snapshot.Kind)
+	if kind == "" {
+		kind = "regular"
+	}
+	createdAt := snapshot.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	if _, err := tx.tx.Exec(
+		`UPDATE snapshots SET kind = ?, created_at = ? WHERE name = ?`,
+		kind,
+		nowString(createdAt),
+		name,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.tx.Exec(`DELETE FROM snapshot_packages WHERE snapshot_name = ?`, name); err != nil {
+		return err
+	}
+	for _, key := range uniqueNonEmpty(packageKeys) {
+		if _, err := tx.tx.Exec(
+			`INSERT INTO snapshot_packages(snapshot_name, package_key) VALUES (?, ?)`,
+			name,
+			key,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SnapshotPackageKeys returns package membership for a snapshot.
 func (s *Store) SnapshotPackageKeys(snapshotName string) ([]string, error) {
 	return queryStrings(s.db.Query(`
@@ -323,6 +380,40 @@ func (s *Store) Snapshot(name string) (SnapshotRecord, error) {
 		return SnapshotRecord{}, err
 	}
 	return record, nil
+}
+
+// Snapshots returns all snapshot records ordered by creation time and name.
+func (s *Store) Snapshots() ([]SnapshotRecord, error) {
+	rows, err := s.db.Query(`
+SELECT name, kind, created_at
+FROM snapshots
+ORDER BY created_at, name
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var snapshots []SnapshotRecord
+	for rows.Next() {
+		var record SnapshotRecord
+		var createdAt string
+		if err := rows.Scan(&record.Name, &record.Kind, &createdAt); err != nil {
+			return nil, err
+		}
+		parsed, err := parseTime(createdAt)
+		if err != nil {
+			return nil, err
+		}
+		record.CreatedAt = parsed
+		snapshots = append(snapshots, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return snapshots, nil
 }
 
 // SetPublished replaces the currently published state.

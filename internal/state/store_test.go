@@ -193,6 +193,29 @@ func TestCreateSnapshotIsImmutable(t *testing.T) {
 	}
 }
 
+func TestReplaceSnapshotReplacesMembership(t *testing.T) {
+	store := openTempStore(t)
+	defer closeStore(t, store)
+	key1 := upsertTestPackage(t, store, testPackage("pkg1", "pool/pkg1.deb"))
+	key2 := upsertTestPackage(t, store, testPackage("pkg2", "pool/pkg2.deb"))
+
+	snapshot := SnapshotRecord{Name: "ubuntu-focal-main_2026-05-27", Kind: "regular", CreatedAt: testTime()}
+	if err := store.CreateSnapshot(snapshot, []string{key1}); err != nil {
+		t.Fatalf("CreateSnapshot returned error: %v", err)
+	}
+	if err := store.ReplaceSnapshot(snapshot, []string{key2}); err != nil {
+		t.Fatalf("ReplaceSnapshot returned error: %v", err)
+	}
+
+	keys, err := store.SnapshotPackageKeys(snapshot.Name)
+	if err != nil {
+		t.Fatalf("SnapshotPackageKeys returned error: %v", err)
+	}
+	if !reflect.DeepEqual(keys, []string{key2}) {
+		t.Fatalf("unexpected replacement membership: %#v", keys)
+	}
+}
+
 func TestSetPublishedSwitchesState(t *testing.T) {
 	store := openTempStore(t)
 	defer closeStore(t, store)

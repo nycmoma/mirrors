@@ -19,7 +19,7 @@ type PackageRecord struct {
 	PoolPath     string
 }
 
-// SnapshotRecord describes an immutable package membership set.
+// SnapshotRecord describes a dated package membership set.
 type SnapshotRecord struct {
 	Name      string
 	Kind      string

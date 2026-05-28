@@ -40,12 +40,12 @@ func TestRunMirrorCommandRequiresIdentity(t *testing.T) {
 }
 
 func TestNotImplementedReportsPlannedPhase(t *testing.T) {
-	err := notImplemented("update")
+	err := notImplemented("hide")
 	if err == nil {
 		t.Fatal("expected not implemented error")
 	}
 
-	want := `action "update" will be implemented in Phase 8: Merged Snapshots.`
+	want := `action "hide" will be implemented in Phase 9: Publish Service.`
 	if err.Error() != want {
 		t.Fatalf("expected %q, got %q", want, err.Error())
 	}

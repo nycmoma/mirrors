@@ -8,6 +8,7 @@ import (
 	"mirrors/internal/cli"
 	"mirrors/internal/config"
 	"mirrors/internal/mirror"
+	"mirrors/internal/snapshot"
 	"mirrors/internal/state"
 )
 
@@ -121,10 +122,21 @@ func runConfigDrivenMirrorCommand(cmd cli.Command) error {
 		printFetchResult("Fetch", result)
 		return nil
 	case "update":
-		fmt.Printf("%s would operate on mirror %q\n", title(cmd.Name), cfg.Name)
-		fmt.Printf("DB path: %s\n", config.DBPath(cfg.Name))
-		fmt.Printf("Mirror components: %s\n", strings.Join(mirror.ComponentMirrorNames(cfg.Name, cfg.Dists, cfg.Releases, cfg.Components), ", "))
-		return notImplemented(cmd.Name)
+		fetchResult, err := service.Fetch(context.Background(), cfg)
+		if err != nil {
+			return err
+		}
+		snapshotService, err := snapshot.NewService()
+		if err != nil {
+			return err
+		}
+		updateResult, err := snapshotService.CreateCurrent(cfg)
+		if err != nil {
+			return err
+		}
+		printFetchResult("Update fetch", fetchResult)
+		printUpdateResult(updateResult)
+		return nil
 	default:
 		return notImplemented(cmd.Name)
 	}
@@ -146,12 +158,40 @@ func runMirrorCommand(cmd cli.Command) error {
 		return err
 	}
 	switch cmd.Name {
+	case "rollback":
+		snapshotService, err := snapshot.NewService()
+		if err != nil {
+			return err
+		}
+		result, err := snapshotService.Rollback(name, cmd.Date, cmd.ID)
+		if err != nil {
+			return err
+		}
+		printRollbackResult(result)
+		return nil
 	case "info":
 		summary, err := service.Info(name)
 		if err != nil {
 			return err
 		}
 		printSummary(summary)
+		snapshotService, err := snapshot.NewService()
+		if err != nil {
+			return err
+		}
+		if cmd.Snapshot != "" {
+			snapshotSummary, err := snapshotService.Snapshot(name, cmd.Snapshot)
+			if err != nil {
+				return err
+			}
+			printSnapshotSummary(snapshotSummary)
+			return nil
+		}
+		snapshots, err := snapshotService.List(name)
+		if err != nil {
+			return err
+		}
+		printSnapshotList(snapshots)
 		return nil
 	case "destroy":
 		if err := service.Destroy(name); err != nil {
@@ -204,8 +244,6 @@ type implementationTarget struct {
 
 var implementationTargets = map[string]implementationTarget{
 	"config generate":  {Phase: 11, Name: "App Workflows"},
-	"update":           {Phase: 8, Name: "Merged Snapshots"},
-	"rollback":         {Phase: 8, Name: "Merged Snapshots"},
 	"daily":            {Phase: 11, Name: "App Workflows"},
 	"weekly":           {Phase: 11, Name: "App Workflows"},
 	"monthly":          {Phase: 11, Name: "App Workflows"},
@@ -255,11 +293,65 @@ func printSummary(summary mirror.Summary) {
 	fmt.Printf("Architectures: %s\n", strings.Join(summary.Config.Arch, ", "))
 	fmt.Printf("Packages: %d current, %d known\n", summary.Stats.MirrorPackageCount, summary.Stats.KnownPackageCount)
 	fmt.Printf("Snapshots: %d\n", summary.Stats.SnapshotCount)
+	if summary.Stats.Published != nil {
+		fmt.Printf("Selected snapshot: %s\n", summary.Stats.Published.SnapshotName)
+	} else {
+		fmt.Println("Selected snapshot: none")
+	}
 	if summary.Stats.LastUpdate != nil {
 		fmt.Printf("Last update: %s %s\n", summary.Stats.LastUpdate.Status, summary.Stats.LastUpdate.FinishedAt.Format("2006-01-02T15:04:05Z07:00"))
 	} else {
 		fmt.Println("Last update: never")
 	}
+}
+
+func printUpdateResult(result snapshot.UpdateResult) {
+	fmt.Printf("Snapshot date: %s\n", result.Date)
+	for _, item := range result.Snapshots {
+		action := "created"
+		if item.Regenerated {
+			action = "regenerated"
+		}
+		fmt.Printf("Snapshot %s: %s (%s, %d packages)\n", action, item.Name, item.Kind, item.PackageCount)
+	}
+	for _, warning := range result.Warnings {
+		fmt.Printf("WARNING: %s\n", warning)
+	}
+	fmt.Printf("Selected snapshot: %s\n", result.SelectedSnapshot)
+	fmt.Println("Published repository files are not generated in Phase 8.")
+}
+
+func printRollbackResult(result snapshot.RollbackResult) {
+	fmt.Printf("Rollback selected snapshot for mirror %q\n", result.MirrorName)
+	fmt.Printf("DB path: %s\n", result.DBPath)
+	fmt.Printf("Selected snapshot: %s\n", result.SelectedSnapshot)
+	if len(result.ResolvedSnapshots) > 1 {
+		fmt.Printf("Resolved snapshot group: %s\n", strings.Join(result.ResolvedSnapshots, ", "))
+	}
+	fmt.Println("Published repository files are not generated in Phase 8.")
+}
+
+func printSnapshotList(snapshots []snapshot.Summary) {
+	if len(snapshots) == 0 {
+		fmt.Println("Snapshot list: none")
+		return
+	}
+	fmt.Println("Snapshot list:")
+	for _, item := range snapshots {
+		fmt.Printf("- %s (%s, %d packages, created %s)\n",
+			item.Record.Name,
+			item.Record.Kind,
+			item.PackageCount,
+			item.Record.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		)
+	}
+}
+
+func printSnapshotSummary(item snapshot.Summary) {
+	fmt.Printf("Snapshot: %s\n", item.Record.Name)
+	fmt.Printf("Kind: %s\n", item.Record.Kind)
+	fmt.Printf("Created: %s\n", item.Record.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	fmt.Printf("Packages: %d\n", item.PackageCount)
 }
 
 func suites(cfg config.Mirror) []string {
