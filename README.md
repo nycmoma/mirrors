@@ -11,7 +11,7 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 6: State Store (Snapshots, Package Membership, Published State)
+Phase 7: Mirror Service
 ```
 
 Implemented packages and behavior:
@@ -50,11 +50,19 @@ Implemented packages and behavior:
   - update history records
   - cleanup reference queries
   - transaction helpers for multi-table workflow updates
+- Mirror service support in `internal/mirror`:
+  - upstream Release and Packages index URL resolution
+  - Release validation for configured origin, label, components, and architectures
+  - package index fetching and parsing
+  - missing package downloads into the local package pool
+  - idempotent package reuse when files already exist in the pool
+  - current mirror package membership updates
+  - mirror list, info, create, fetch, and destroy operations
 
 Next target:
 
 ```text
-Phase 7: Mirror Service
+Phase 8: Merged Snapshots
 ```
 
 ## Available Actions
@@ -66,6 +74,11 @@ mirror --help
 mirror config validate -c|--config <config_file>
 mirror config show -c|--config <config_file>
 mirror config show -n|--name <mirror_name>
+mirror create -c|--config <config_file>
+mirror fetch -c|--config <config_file>
+mirror list
+mirror info [-n|--name <mirror_name> | -c|--config <config_file>]
+mirror destroy [-n|--name <mirror_name> | -c|--config <config_file>]
 ```
 
 `config show -n` reads normalized config data from:
@@ -77,11 +90,11 @@ mirror config show -n|--name <mirror_name>
 New DB files are created automatically when the state package opens a mirror
 database.
 
-End-to-end mirror workflows such as `create`, `fetch`, `update`, `rollback`,
-`hide`, and `cleanup` are not wired yet. They report the planned phase:
+Snapshot and publish workflows such as `update`, `rollback`, `hide`, and
+`cleanup` are not wired yet. They report the planned phase:
 
 ```text
-ERROR: action "create" will be implemented in Phase 7: Mirror Service.
+ERROR: action "update" will be implemented in Phase 8: Merged Snapshots.
 ```
 
 ## Usage Examples
@@ -91,6 +104,9 @@ go run . --help
 go run . config validate -c ./chrome_stable.conf
 go run . config show -c ./chrome_stable.conf
 go run . config show -n chrome_stable
+go run . fetch -c ./chrome_stable.conf
+go run . list
+go run . info -n chrome_stable
 ```
 
 ## Planned Command Shape

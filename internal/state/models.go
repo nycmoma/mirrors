@@ -63,3 +63,12 @@ type CleanupRef struct {
 	RefType  string
 	RefName  string
 }
+
+// Stats summarizes mirror state for list/info output.
+type Stats struct {
+	KnownPackageCount  int
+	MirrorPackageCount int
+	SnapshotCount      int
+	Published          *PublishedRecord
+	LastUpdate         *UpdateRecord
+}

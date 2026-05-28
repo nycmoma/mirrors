@@ -2,6 +2,7 @@ package state
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -185,6 +186,11 @@ WHERE package_key = ?
 `, key))
 }
 
+// PackageKey returns the state identity key for a package record.
+func PackageKey(pkg PackageRecord) (string, error) {
+	return normalizePackageKey(pkg)
+}
+
 // ReplaceMirrorPackages replaces the current upstream package membership set.
 func (s *Store) ReplaceMirrorPackages(packageKeys []string) error {
 	return s.WithTx(func(tx *Tx) error {
@@ -208,6 +214,36 @@ func (tx *Tx) ReplaceMirrorPackages(packageKeys []string) error {
 // MirrorPackageKeys returns the current mirror package membership set.
 func (s *Store) MirrorPackageKeys() ([]string, error) {
 	return queryStrings(s.db.Query(`SELECT package_key FROM mirror_packages ORDER BY package_key`))
+}
+
+// Stats returns package, snapshot, published, and last update summary data.
+func (s *Store) Stats() (Stats, error) {
+	var stats Stats
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM packages`).Scan(&stats.KnownPackageCount); err != nil {
+		return Stats{}, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM mirror_packages`).Scan(&stats.MirrorPackageCount); err != nil {
+		return Stats{}, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM snapshots`).Scan(&stats.SnapshotCount); err != nil {
+		return Stats{}, err
+	}
+
+	published, err := s.Published()
+	if err == nil {
+		stats.Published = &published
+	} else if !isNoRows(err) {
+		return Stats{}, err
+	}
+
+	lastUpdate, err := s.LastUpdate()
+	if err == nil {
+		stats.LastUpdate = &lastUpdate
+	} else if !isNoRows(err) {
+		return Stats{}, err
+	}
+
+	return stats, nil
 }
 
 // CreateSnapshot records an immutable snapshot and its package membership.
@@ -391,6 +427,38 @@ VALUES (?, ?, ?, ?, ?)
 	return result.LastInsertId()
 }
 
+// LastUpdate returns the most recent update history record.
+func (s *Store) LastUpdate() (UpdateRecord, error) {
+	var record UpdateRecord
+	var startedAt string
+	var finishedAt string
+	err := s.db.QueryRow(`
+SELECT id, action, status, message, started_at, finished_at
+FROM update_history
+ORDER BY id DESC
+LIMIT 1
+`).Scan(
+		&record.ID,
+		&record.Action,
+		&record.Status,
+		&record.Message,
+		&startedAt,
+		&finishedAt,
+	)
+	if err != nil {
+		return UpdateRecord{}, err
+	}
+	record.StartedAt, err = parseTime(startedAt)
+	if err != nil {
+		return UpdateRecord{}, err
+	}
+	record.FinishedAt, err = parseTime(finishedAt)
+	if err != nil {
+		return UpdateRecord{}, err
+	}
+	return record, nil
+}
+
 // UpsertUpstreamIndex inserts or updates metadata fetched from upstream.
 func (s *Store) UpsertUpstreamIndex(record UpstreamIndexRecord) error {
 	return s.WithTx(func(tx *Tx) error {
@@ -508,4 +576,8 @@ func queryStrings(rows *sql.Rows, err error) ([]string, error) {
 		return nil, err
 	}
 	return values, nil
+}
+
+func isNoRows(err error) bool {
+	return errors.Is(err, sql.ErrNoRows)
 }
