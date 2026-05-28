@@ -197,6 +197,10 @@ SHA256:
 			Arch:       []string{"amd64"},
 			Components: []string{"main"},
 			Path:       "ubuntu",
+			Signing: config.Signing{
+				GPGKey:        "560CE107BECFB86BF8BED1DBD9FEEBA651DA48E7",
+				GPGPassphrase: "1234",
+			},
 		},
 		files: map[string][]byte{
 			baseURL + "/dists/focal/Release":                    []byte(release),

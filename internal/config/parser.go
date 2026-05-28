@@ -18,39 +18,58 @@ func Load(path string) (Mirror, error) {
 	if err != nil {
 		return Mirror{}, err
 	}
+	signing, err := ParseSigning(raw["sign"])
+	if err != nil {
+		return Mirror{}, err
+	}
 
 	return FromValues(Values{
-		Name:       strings.TrimSpace(raw["name"]),
-		URL:        strings.TrimSpace(raw["url"]),
-		Dist:       raw["dist"],
-		Release:    raw["release"],
-		Origin:     strings.TrimSpace(defaultString(raw["origin"], "default")),
-		Label:      strings.TrimSpace(defaultString(raw["label"], "default")),
-		Arch:       raw["arch"],
-		Components: raw["components"],
-		Path:       strings.TrimSpace(raw["path"]),
-		Merge:      merge,
-		Server:     strings.TrimSpace(raw["server"]),
+		Name:              strings.TrimSpace(raw["name"]),
+		URL:               strings.TrimSpace(raw["url"]),
+		Dist:              raw["dist"],
+		Release:           raw["release"],
+		Origin:            strings.TrimSpace(defaultString(raw["origin"], "default")),
+		Label:             strings.TrimSpace(defaultString(raw["label"], "default")),
+		Arch:              raw["arch"],
+		Components:        raw["components"],
+		Path:              strings.TrimSpace(raw["path"]),
+		Merge:             merge,
+		Server:            strings.TrimSpace(raw["server"]),
+		Signing:           signing,
+		GPGHome:           strings.TrimSpace(raw["gpg_home"]),
+		GPGKey:            strings.TrimSpace(raw["gpg_key"]),
+		GPGPassphrase:     strings.TrimSpace(raw["gpg_passphrase"]),
+		GPGPassphraseFile: strings.TrimSpace(raw["gpg_passphrase_file"]),
 	}), nil
 }
 
 // Values contains raw scalar config values before list normalization.
 type Values struct {
-	Name       string
-	URL        string
-	Dist       string
-	Release    string
-	Origin     string
-	Label      string
-	Arch       string
-	Components string
-	Path       string
-	Merge      Merge
-	Server     string
+	Name              string
+	URL               string
+	Dist              string
+	Release           string
+	Origin            string
+	Label             string
+	Arch              string
+	Components        string
+	Path              string
+	Merge             Merge
+	Server            string
+	Signing           Signing
+	GPGHome           string
+	GPGKey            string
+	GPGPassphrase     string
+	GPGPassphraseFile string
 }
 
 // FromValues builds a normalized Mirror from raw config values.
 func FromValues(values Values) Mirror {
+	signing := values.Signing
+	signing.GPGHome = strings.TrimSpace(values.GPGHome)
+	signing.GPGKey = strings.TrimSpace(values.GPGKey)
+	signing.GPGPassphrase = strings.TrimSpace(values.GPGPassphrase)
+	signing.GPGPassphraseFile = strings.TrimSpace(values.GPGPassphraseFile)
 	return Mirror{
 		Name:       strings.TrimSpace(values.Name),
 		URL:        strings.TrimSpace(values.URL),
@@ -63,6 +82,7 @@ func FromValues(values Values) Mirror {
 		Path:       strings.TrimSpace(values.Path),
 		Merge:      values.Merge,
 		Server:     strings.TrimSpace(values.Server),
+		Signing:    signing,
 	}
 }
 
@@ -142,4 +162,16 @@ func ParseMerge(value string) (Merge, error) {
 		depth = depth*10 + int(char-'0')
 	}
 	return Merge{Enabled: depth > 0, Depth: depth}, nil
+}
+
+func ParseSigning(value string) (Signing, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "yes", "1", "true":
+		return Signing{}, nil
+	case "no", "0", "false":
+		return Signing{Disabled: true}, nil
+	default:
+		return Signing{}, fmt.Errorf("invalid sign value %q: use yes or no", value)
+	}
 }

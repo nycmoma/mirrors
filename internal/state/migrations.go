@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const latestSchemaVersion = 2
+const latestSchemaVersion = 3
 
 type migration struct {
 	version int
@@ -127,6 +127,16 @@ CREATE TABLE IF NOT EXISTS upstream_releases (
 	label TEXT NOT NULL,
 	fetched_at TEXT NOT NULL
 );
+`,
+	},
+	{
+		version: 3,
+		sql: `
+ALTER TABLE mirror ADD COLUMN sign TEXT NOT NULL DEFAULT 'yes';
+ALTER TABLE mirror ADD COLUMN gpg_home TEXT NOT NULL DEFAULT '';
+ALTER TABLE mirror ADD COLUMN gpg_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE mirror ADD COLUMN gpg_passphrase TEXT NOT NULL DEFAULT '';
+ALTER TABLE mirror ADD COLUMN gpg_passphrase_file TEXT NOT NULL DEFAULT '';
 `,
 	},
 }

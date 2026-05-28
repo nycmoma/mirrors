@@ -225,6 +225,10 @@ func testConfig(mergeEnabled bool) config.Mirror {
 		Components: []string{"main"},
 		Path:       "ubuntu",
 		Merge:      config.Merge{Enabled: mergeEnabled},
+		Signing: config.Signing{
+			GPGKey:        "560CE107BECFB86BF8BED1DBD9FEEBA651DA48E7",
+			GPGPassphrase: "1234",
+		},
 	}
 }
 

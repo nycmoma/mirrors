@@ -11,7 +11,7 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 9: Publish Service
+Phase 10: Signing
 ```
 
 Implemented packages and behavior:
@@ -77,11 +77,18 @@ Implemented packages and behavior:
   - package hardlinking from the local package pool with copy fallback
   - publish switching for create, update, and rollback
   - hide/unpublish while preserving mirror state, snapshots, and packages
+- Signing support in `internal/signing`:
+  - default-on `gpg` signing for published repository metadata
+  - optional `sign = no` config to publish unsigned output
+  - config, environment, and default-key signing resolution
+  - passphrase support from config value, passphrase file, or environment
+  - `InRelease` and `Release.gpg` generation from the current `Release`
+  - stale signature removal before each signing attempt
 
 Next target:
 
 ```text
-Phase 10: Signing
+Phase 11: App Workflows
 ```
 
 ## Available Actions
@@ -112,13 +119,20 @@ mirror destroy [-n|--name <mirror_name> | -c|--config <config_file>]
 New DB files are created automatically when the state package opens a mirror
 database.
 
-Signing is not wired yet. Phase 9 publishes unsigned repository output:
+Published repository output now includes signed metadata by default:
 
 ```text
 Packages
 Packages.gz
 Release
+InRelease
+Release.gpg
 ```
+
+Signing can be disabled per mirror with `sign = no`. When signing is enabled,
+`gpg_key`, `gpg_home`, `gpg_passphrase`, and `gpg_passphrase_file` can be set
+in `[mirror]`; otherwise `GPG_KEY` and `GPG_PASSPHRASE` are used when present,
+with `gpg` default key behavior as the final fallback.
 
 ## Usage Examples
 
@@ -151,8 +165,8 @@ mirror weekly [-n|--name <mirror_name> | -c|--config <config_file>]
 mirror monthly [-n|--name <mirror_name> | -c|--config <config_file>]
 mirror hide [-n|--name <mirror_name> | -c|--config <config_file>]
 mirror destroy [-n|--name <mirror_name> | -c|--config <config_file>]
-mirror cleanup [-n|--name <mirror_name> | -c|--config <config_file>] [-d|--date YYYY-MM-DD] [--remove]
+mirror cleanup [-n|--name <mirror_name> | -c|--config <config_file>] [--days <days> | --all]
 mirror list
-mirror info [-n|--name <mirror_name> | -c|--config <config_file>] [-s|--snapshot <snapshot_id>]
+mirror info [-n|--name <mirror_name> | -u|--URL <repo_url> | -c|--config <config_file>] [-s|--snapshot <snapshot_id>]
 mirror more-info ...
 ```

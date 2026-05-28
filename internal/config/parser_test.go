@@ -116,6 +116,73 @@ merge = `+tt.value+`
 	}
 }
 
+func TestLoadSigningFields(t *testing.T) {
+	path := writeTempConfig(t, `[mirror]
+name = ubuntu-xenial
+url = http://archive.ubuntu.com/ubuntu/
+dist = xenial
+release = default
+arch = amd64
+components = main
+path = ubuntu
+sign = no
+gpg_home = /tmp/gnupg
+gpg_key = 560CE107BECFB86BF8BED1DBD9FEEBA651DA48E7
+gpg_passphrase = 1234
+gpg_passphrase_file = /tmp/passphrase
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if !cfg.Signing.Disabled {
+		t.Fatal("expected signing disabled")
+	}
+	if cfg.Signing.GPGHome != "/tmp/gnupg" || cfg.Signing.GPGKey != "560CE107BECFB86BF8BED1DBD9FEEBA651DA48E7" {
+		t.Fatalf("unexpected gpg config: %#v", cfg.Signing)
+	}
+	if cfg.Signing.GPGPassphrase != "1234" || cfg.Signing.GPGPassphraseFile != "/tmp/passphrase" {
+		t.Fatalf("unexpected passphrase config: %#v", cfg.Signing)
+	}
+}
+
+func TestLoadSigningDefaultsEnabled(t *testing.T) {
+	path := writeTempConfig(t, `[mirror]
+name = ubuntu-xenial
+url = http://archive.ubuntu.com/ubuntu/
+dist = xenial
+release = default
+arch = amd64
+components = main
+path = ubuntu
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Signing.Disabled {
+		t.Fatal("signing should be enabled by default")
+	}
+}
+
+func TestLoadRejectsInvalidSign(t *testing.T) {
+	path := writeTempConfig(t, `[mirror]
+name = ubuntu-xenial
+url = http://archive.ubuntu.com/ubuntu/
+dist = xenial
+release = default
+arch = amd64
+components = main
+path = ubuntu
+sign = maybe
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected invalid sign error")
+	}
+}
+
 func TestLoadRejectsInvalidMerge(t *testing.T) {
 	tests := []string{"sometimes", "true", "false"}
 	for _, value := range tests {
@@ -148,7 +215,7 @@ arch = amd64
 components = main, restricted, multiverse, universe
 update = weekly
 path = preprod
-server = http://dlt-ubmirror.datto.com
+server = http://mirror.example.test/
 `)
 
 	cfg, err := Load(path)

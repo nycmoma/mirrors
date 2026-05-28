@@ -130,7 +130,9 @@ label = aptly_default
 arch = amd64
 components = main, restricted, multiverse, universe
 path = preprod
-server = http://dlt-ubmirror.datto.com
+server = http://mirror.example.test
+gpg_key = 560CE107BECFB86BF8BED1DBD9FEEBA651DA48E7
+gpg_passphrase = 1234
 `
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)

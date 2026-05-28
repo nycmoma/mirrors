@@ -80,6 +80,7 @@ func TestSaveAndLoadMirrorConfig(t *testing.T) {
 
 	cfg.Path = "updated"
 	cfg.Merge = config.Merge{Enabled: true, Depth: 2}
+	cfg.Signing.Disabled = true
 	if err := store.SaveMirrorConfig(cfg); err != nil {
 		t.Fatalf("second SaveMirrorConfig returned error: %v", err)
 	}
@@ -90,6 +91,9 @@ func TestSaveAndLoadMirrorConfig(t *testing.T) {
 	}
 	if loaded.Path != "updated" || loaded.Merge.Depth != 2 {
 		t.Fatalf("config update was not persisted: %#v", loaded)
+	}
+	if !loaded.Signing.Disabled {
+		t.Fatalf("signing update was not persisted: %#v", loaded.Signing)
 	}
 }
 
@@ -425,6 +429,12 @@ func testConfig() config.Mirror {
 		Path:       "preprod",
 		Merge:      config.Merge{Enabled: true},
 		Server:     "http://mirror.example.test",
+		Signing: config.Signing{
+			GPGHome:           "/tmp/gnupg",
+			GPGKey:            "560CE107BECFB86BF8BED1DBD9FEEBA651DA48E7",
+			GPGPassphrase:     "1234",
+			GPGPassphraseFile: "/tmp/gpg-passphrase",
+		},
 	}
 }
 

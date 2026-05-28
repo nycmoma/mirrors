@@ -9,6 +9,7 @@ import (
 	"mirrors/internal/config"
 	"mirrors/internal/mirror"
 	"mirrors/internal/publish"
+	"mirrors/internal/signing"
 	"mirrors/internal/snapshot"
 	"mirrors/internal/state"
 )
@@ -145,9 +146,14 @@ func runPublishUpdate(action string, mirrorService *mirror.Service, cfg config.M
 	if err != nil {
 		return err
 	}
+	signResult, err := signPublished(context.Background(), cfg, publishResult)
+	if err != nil {
+		return err
+	}
 	printFetchResult(action+" fetch", fetchResult)
 	printUpdateResult(updateResult)
 	printPublishResult(publishResult)
+	printSigningResult(signResult)
 	return nil
 }
 
@@ -189,7 +195,12 @@ func runMirrorCommand(cmd cli.Command) error {
 		if err != nil {
 			return err
 		}
+		signResult, err := signPublished(context.Background(), cfg, publishResult)
+		if err != nil {
+			return err
+		}
 		printPublishResult(publishResult)
+		printSigningResult(signResult)
 		return nil
 	case "info":
 		summary, err := service.Info(name)
@@ -387,7 +398,24 @@ func printPublishResult(result publish.Result) {
 	fmt.Printf("Snapshots: %s\n", strings.Join(result.Snapshots, ", "))
 	fmt.Printf("Packages: %d\n", result.Packages)
 	fmt.Printf("Indexes: %d\n", result.Indexes)
-	fmt.Println("Signing is not implemented until Phase 10.")
+}
+
+func signPublished(ctx context.Context, cfg config.Mirror, result publish.Result) (signing.Result, error) {
+	service := signing.NewService()
+	return service.Sign(ctx, cfg, signing.Repository{
+		Path:  result.Path,
+		Suite: result.Suite,
+	})
+}
+
+func printSigningResult(result signing.Result) {
+	if !result.Enabled {
+		fmt.Println("Signing: disabled")
+		return
+	}
+	fmt.Println("Signing: complete")
+	fmt.Printf("InRelease: %s\n", result.InRelease)
+	fmt.Printf("Release.gpg: %s\n", result.ReleaseGPG)
 }
 
 func printSnapshotList(snapshots []snapshot.Summary) {

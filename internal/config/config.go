@@ -21,12 +21,22 @@ type Mirror struct {
 	Path       string
 	Merge      Merge
 	Server     string
+	Signing    Signing
 }
 
 // Merge describes snapshot merge behavior.
 type Merge struct {
 	Enabled bool
 	Depth   int
+}
+
+// Signing describes optional repository signing settings.
+type Signing struct {
+	Disabled          bool
+	GPGHome           string
+	GPGKey            string
+	GPGPassphrase     string
+	GPGPassphraseFile string
 }
 
 const (
@@ -75,6 +85,10 @@ components = %s
 path = %s
 merge = %s
 server = %s
+sign = %s
+gpg_home = %s
+gpg_key = %s
+gpg_passphrase_file = %s
 `,
 		m.Name,
 		m.URL,
@@ -87,6 +101,10 @@ server = %s
 		m.Path,
 		m.Merge.String(),
 		m.Server,
+		signString(!m.Signing.Disabled),
+		m.Signing.GPGHome,
+		m.Signing.GPGKey,
+		m.Signing.GPGPassphraseFile,
 	)
 }
 
@@ -99,4 +117,11 @@ func (m Merge) String() string {
 		return fmt.Sprintf("%d", m.Depth)
 	}
 	return "yes"
+}
+
+func signString(enabled bool) string {
+	if enabled {
+		return "yes"
+	}
+	return "no"
 }

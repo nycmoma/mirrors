@@ -48,8 +48,9 @@ func (tx *Tx) SaveMirrorConfig(cfg config.Mirror) error {
 	}
 	_, err := tx.tx.Exec(`
 INSERT INTO mirror (
-	name, url, dist, release, origin, label, arch, components, path, merge, server
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	name, url, dist, release, origin, label, arch, components, path, merge,
+	server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 		cfg.Name,
 		cfg.URL,
@@ -62,6 +63,11 @@ INSERT INTO mirror (
 		cfg.Path,
 		cfg.Merge.String(),
 		cfg.Server,
+		signValue(!cfg.Signing.Disabled),
+		cfg.Signing.GPGHome,
+		cfg.Signing.GPGKey,
+		cfg.Signing.GPGPassphrase,
+		cfg.Signing.GPGPassphraseFile,
 	)
 	return err
 }
@@ -69,7 +75,8 @@ INSERT INTO mirror (
 // MirrorConfig returns the one normalized mirror config record in this DB.
 func (s *Store) MirrorConfig() (config.Mirror, error) {
 	return scanMirrorConfig(s.db.QueryRow(`
-SELECT name, url, dist, release, origin, label, arch, components, path, merge, server
+SELECT name, url, dist, release, origin, label, arch, components, path, merge,
+       server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file
 FROM mirror
 LIMIT 1
 `))
@@ -78,7 +85,8 @@ LIMIT 1
 // MirrorConfig returns the one normalized mirror config record in this transaction.
 func (tx *Tx) MirrorConfig() (config.Mirror, error) {
 	return scanMirrorConfig(tx.tx.QueryRow(`
-SELECT name, url, dist, release, origin, label, arch, components, path, merge, server
+SELECT name, url, dist, release, origin, label, arch, components, path, merge,
+       server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file
 FROM mirror
 LIMIT 1
 `))
@@ -89,6 +97,7 @@ func scanMirrorConfig(row interface {
 }) (config.Mirror, error) {
 	var values config.Values
 	var mergeValue string
+	var signValue string
 	err := row.Scan(
 		&values.Name,
 		&values.URL,
@@ -101,6 +110,11 @@ func scanMirrorConfig(row interface {
 		&values.Path,
 		&mergeValue,
 		&values.Server,
+		&signValue,
+		&values.GPGHome,
+		&values.GPGKey,
+		&values.GPGPassphrase,
+		&values.GPGPassphraseFile,
 	)
 	if err != nil {
 		return config.Mirror{}, err
@@ -111,6 +125,11 @@ func scanMirrorConfig(row interface {
 		return config.Mirror{}, err
 	}
 	values.Merge = merge
+	signing, err := config.ParseSigning(signValue)
+	if err != nil {
+		return config.Mirror{}, err
+	}
+	values.Signing = signing
 
 	cfg := config.FromValues(values)
 	if err := config.Validate(cfg); err != nil {
@@ -825,6 +844,13 @@ func queryStrings(rows *sql.Rows, err error) ([]string, error) {
 
 func isNoRows(err error) bool {
 	return errors.Is(err, sql.ErrNoRows)
+}
+
+func signValue(enabled bool) string {
+	if enabled {
+		return "yes"
+	}
+	return "no"
 }
 
 func encodeFields(fields map[string]string) (string, error) {
