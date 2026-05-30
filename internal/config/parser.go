@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -23,7 +24,7 @@ func Load(path string) (Mirror, error) {
 		return Mirror{}, err
 	}
 
-	return FromValues(Values{
+	cfg := FromValues(Values{
 		Name:              strings.TrimSpace(raw["name"]),
 		URL:               strings.TrimSpace(raw["url"]),
 		Dist:              raw["dist"],
@@ -40,7 +41,9 @@ func Load(path string) (Mirror, error) {
 		GPGKey:            strings.TrimSpace(raw["gpg_key"]),
 		GPGPassphrase:     strings.TrimSpace(raw["gpg_passphrase"]),
 		GPGPassphraseFile: strings.TrimSpace(raw["gpg_passphrase_file"]),
-	}), nil
+	})
+	cfg.ConfigPath = absolutePath(path)
+	return cfg, nil
 }
 
 // Values contains raw scalar config values before list normalization.
@@ -143,6 +146,14 @@ func defaultString(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func absolutePath(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return absolute
 }
 
 func ParseMerge(value string) (Merge, error) {

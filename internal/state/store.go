@@ -49,8 +49,9 @@ func (tx *Tx) SaveMirrorConfig(cfg config.Mirror) error {
 	_, err := tx.tx.Exec(`
 INSERT INTO mirror (
 	name, url, dist, release, origin, label, arch, components, path, merge,
-	server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file,
+	config_path
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 		cfg.Name,
 		cfg.URL,
@@ -68,6 +69,7 @@ INSERT INTO mirror (
 		cfg.Signing.GPGKey,
 		cfg.Signing.GPGPassphrase,
 		cfg.Signing.GPGPassphraseFile,
+		cfg.ConfigPath,
 	)
 	return err
 }
@@ -76,7 +78,8 @@ INSERT INTO mirror (
 func (s *Store) MirrorConfig() (config.Mirror, error) {
 	return scanMirrorConfig(s.db.QueryRow(`
 SELECT name, url, dist, release, origin, label, arch, components, path, merge,
-       server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file
+       server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file,
+       config_path
 FROM mirror
 LIMIT 1
 `))
@@ -86,7 +89,8 @@ LIMIT 1
 func (tx *Tx) MirrorConfig() (config.Mirror, error) {
 	return scanMirrorConfig(tx.tx.QueryRow(`
 SELECT name, url, dist, release, origin, label, arch, components, path, merge,
-       server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file
+       server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file,
+       config_path
 FROM mirror
 LIMIT 1
 `))
@@ -98,6 +102,7 @@ func scanMirrorConfig(row interface {
 	var values config.Values
 	var mergeValue string
 	var signValue string
+	var configPath string
 	err := row.Scan(
 		&values.Name,
 		&values.URL,
@@ -115,6 +120,7 @@ func scanMirrorConfig(row interface {
 		&values.GPGKey,
 		&values.GPGPassphrase,
 		&values.GPGPassphraseFile,
+		&configPath,
 	)
 	if err != nil {
 		return config.Mirror{}, err
@@ -132,6 +138,7 @@ func scanMirrorConfig(row interface {
 	values.Signing = signing
 
 	cfg := config.FromValues(values)
+	cfg.ConfigPath = configPath
 	if err := config.Validate(cfg); err != nil {
 		return config.Mirror{}, err
 	}
@@ -225,6 +232,35 @@ func (s *Store) Packages(keys []string) ([]PackageRecord, error) {
 	return records, nil
 }
 
+// AllPackages returns every known package record.
+func (s *Store) AllPackages() ([]PackageRecord, error) {
+	rows, err := s.db.Query(`
+SELECT package_key, name, version, architecture, filename, component, source, size,
+       md5, sha1, sha256, sha512, pool_path, fields_json
+FROM packages
+ORDER BY name, version, architecture, filename
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var records []PackageRecord
+	for rows.Next() {
+		record, err := scanPackage(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
 // SnapshotPackages returns package records and stanza fields captured for a snapshot.
 func (s *Store) SnapshotPackages(snapshotName string) ([]PackageRecord, error) {
 	rows, err := s.db.Query(`
@@ -293,6 +329,17 @@ func (s *Store) Stats() (Stats, error) {
 		return Stats{}, err
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM mirror_packages`).Scan(&stats.MirrorPackageCount); err != nil {
+		return Stats{}, err
+	}
+	if err := s.db.QueryRow(`
+SELECT COALESCE(SUM(size), 0)
+FROM (
+	SELECT MAX(p.size) AS size
+	FROM mirror_packages mp
+	JOIN packages p ON p.package_key = mp.package_key
+	GROUP BY CASE WHEN p.pool_path = '' THEN p.package_key ELSE p.pool_path END
+)
+`).Scan(&stats.MirrorSizeBytes); err != nil {
 		return Stats{}, err
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM snapshots`).Scan(&stats.SnapshotCount); err != nil {
@@ -535,6 +582,28 @@ ORDER BY created_at, name
 		return nil, err
 	}
 	return snapshots, nil
+}
+
+// DeleteSnapshots removes snapshots by name. Snapshot package membership is
+// removed by the database foreign key cascade.
+func (s *Store) DeleteSnapshots(names []string) error {
+	return s.WithTx(func(tx *Tx) error {
+		return tx.DeleteSnapshots(names)
+	})
+}
+
+// DeleteSnapshots removes snapshots by name. Snapshot package membership is
+// removed by the database foreign key cascade.
+func (tx *Tx) DeleteSnapshots(names []string) error {
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("snapshot name is required")
+		}
+		if _, err := tx.tx.Exec(`DELETE FROM snapshots WHERE name = ?`, name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SetPublished replaces the currently published state.

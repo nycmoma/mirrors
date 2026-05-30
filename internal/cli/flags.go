@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -11,14 +12,16 @@ type Command struct {
 	Name       string
 	Subcommand string
 
-	ConfigPath string
-	NameRef    string
-	URL        string
-	Date       string
-	ID         string
-	Snapshot   string
-	Remove     bool
-	Help       bool
+	ConfigPath     string
+	NameRef        string
+	URL            string
+	Date           string
+	ID             string
+	Snapshot       string
+	CleanupDays    int
+	CleanupDaysSet bool
+	CleanupAll     bool
+	Help           bool
 }
 
 // FullName returns command plus subcommand for display.
@@ -104,8 +107,21 @@ func Parse(args []string) (Command, error) {
 			cmd.Snapshot = value
 			i = next
 			continue
-		case "--remove":
-			cmd.Remove = true
+		case "--days":
+			value, next, err := requireValue(args, i, arg)
+			if err != nil {
+				return cmd, err
+			}
+			days, err := strconv.Atoi(value)
+			if err != nil || days < 0 {
+				return cmd, fmt.Errorf("invalid value for --days: use a non-negative integer")
+			}
+			cmd.CleanupDays = days
+			cmd.CleanupDaysSet = true
+			i = next
+			continue
+		case "--all":
+			cmd.CleanupAll = true
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return cmd, fmt.Errorf("unknown flag %s", arg)
@@ -130,7 +146,15 @@ func validate(cmd Command) error {
 	switch cmd.Name {
 	case "config":
 		return validateConfigCommand(cmd)
-	case "create", "fetch", "update", "rollback", "daily", "weekly", "monthly", "hide", "destroy", "cleanup", "list", "info", "more-info":
+	case "create", "fetch", "update", "rollback", "daily", "weekly", "monthly", "hide", "destroy", "list", "info", "more-info":
+		return nil
+	case "cleanup":
+		if cmd.CleanupDaysSet && cmd.CleanupAll {
+			return fmt.Errorf("ambiguous cleanup mode: provide either --days or --all, not both")
+		}
+		if cmd.Date != "" {
+			return fmt.Errorf("cleanup does not accept --date; use --days <days> or --all")
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown command %q", cmd.Name)

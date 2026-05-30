@@ -11,6 +11,7 @@ import (
 // Mirror is the normalized [mirror] configuration.
 type Mirror struct {
 	Name       string
+	ConfigPath string
 	URL        string
 	Dists      []string
 	Releases   []string

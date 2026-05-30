@@ -77,6 +77,7 @@ type CleanupRef struct {
 type Stats struct {
 	KnownPackageCount  int
 	MirrorPackageCount int
+	MirrorSizeBytes    int64
 	SnapshotCount      int
 	Published          *PublishedRecord
 	LastUpdate         *UpdateRecord

@@ -92,8 +92,9 @@ type RollbackResult struct {
 
 // Summary describes one snapshot for info output.
 type Summary struct {
-	Record       state.SnapshotRecord
-	PackageCount int
+	Record           state.SnapshotRecord
+	PackageCount     int
+	PackageSizeBytes int64
 }
 
 // CreateCurrent creates or regenerates today's regular and merged snapshots.
@@ -324,16 +325,34 @@ func (s *Service) createOrRegeneratePackages(store *state.Store, snapshot state.
 func snapshotSummaries(store *state.Store, snapshots []state.SnapshotRecord) ([]Summary, error) {
 	var summaries []Summary
 	for _, record := range snapshots {
-		keys, err := store.SnapshotPackageKeys(record.Name)
+		packages, err := store.SnapshotPackages(record.Name)
 		if err != nil {
 			return nil, err
 		}
 		summaries = append(summaries, Summary{
-			Record:       record,
-			PackageCount: len(keys),
+			Record:           record,
+			PackageCount:     len(packages),
+			PackageSizeBytes: packageSizeBytes(packages),
 		})
 	}
 	return summaries, nil
+}
+
+func packageSizeBytes(packages []state.PackageRecord) int64 {
+	var size int64
+	seen := map[string]bool{}
+	for _, pkg := range packages {
+		key := pkg.PoolPath
+		if key == "" {
+			key = pkg.Key
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		size += pkg.Size
+	}
+	return size
 }
 
 func (s *Service) mergedPackages(store *state.Store, componentMirrorName string, merge config.Merge) ([]state.PackageRecord, []string, error) {

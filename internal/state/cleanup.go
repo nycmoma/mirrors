@@ -71,6 +71,40 @@ ORDER BY p.pool_path
 `))
 }
 
+// DeleteUnreferencedPackage removes one package row only when no mirror,
+// snapshot, or explicit cleanup reference still points at its pool path.
+func (s *Store) DeleteUnreferencedPackage(poolPath string) error {
+	return s.WithTx(func(tx *Tx) error {
+		return tx.DeleteUnreferencedPackage(poolPath)
+	})
+}
+
+// DeleteUnreferencedPackage removes one package row only when no mirror,
+// snapshot, or explicit cleanup reference still points at its pool path.
+func (tx *Tx) DeleteUnreferencedPackage(poolPath string) error {
+	if poolPath == "" {
+		return fmt.Errorf("package pool path is required")
+	}
+	result, err := tx.tx.Exec(`
+DELETE FROM packages
+WHERE pool_path = ?
+  AND NOT EXISTS (SELECT 1 FROM mirror_packages mp WHERE mp.package_key = packages.package_key)
+  AND NOT EXISTS (SELECT 1 FROM snapshot_packages sp WHERE sp.package_key = packages.package_key)
+  AND NOT EXISTS (SELECT 1 FROM cleanup_refs cr WHERE cr.pool_path = packages.pool_path)
+`, poolPath)
+	if err != nil {
+		return err
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if removed == 0 {
+		return fmt.Errorf("refusing to delete referenced or unknown package row: %s", poolPath)
+	}
+	return nil
+}
+
 func nowString(t time.Time) string {
 	return t.UTC().Format(timeFormat)
 }

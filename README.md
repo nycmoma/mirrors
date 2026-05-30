@@ -14,6 +14,8 @@ Completed through:
 Phase 10: Signing
 ```
 
+Phase 11 app workflows are in progress.
+
 Implemented packages and behavior:
 
 - CLI parsing and app dispatch.
@@ -84,12 +86,13 @@ Implemented packages and behavior:
   - passphrase support from config value, passphrase file, or environment
   - `InRelease` and `Release.gpg` generation from the current `Release`
   - stale signature removal before each signing attempt
-
-Next target:
-
-```text
-Phase 11: App Workflows
-```
+- App workflow support in `internal/app` currently includes:
+  - `config generate` starter config rendering from a Release/InRelease URL
+  - `daily`, `weekly`, and `monthly` update workflow aliases
+  - cleanup summary reporting for snapshots and unreferenced package pool files
+  - cleanup retention with `--days` or `--all`
+  - published snapshot preservation during cleanup
+  - expanded `more-info` output
 
 ## Available Actions
 
@@ -97,16 +100,22 @@ Currently implemented user-facing actions:
 
 ```text
 mirror --help
+mirror config generate -u|--URL <release_url>
 mirror config validate -c|--config <config_file>
 mirror config show -c|--config <config_file>
 mirror config show -n|--name <mirror_name>
 mirror create -c|--config <config_file>
 mirror fetch -c|--config <config_file>
 mirror update -c|--config <config_file>
+mirror daily [-n|--name <mirror_name> | -c|--config <config_file>]
+mirror weekly [-n|--name <mirror_name> | -c|--config <config_file>]
+mirror monthly [-n|--name <mirror_name> | -c|--config <config_file>]
 mirror rollback [-n|--name <mirror_name> | -c|--config <config_file>] [-d|--date YYYY-MM-DD | -i|--id <snapshot_id>]
 mirror hide [-n|--name <mirror_name> | -c|--config <config_file>]
+mirror cleanup [-n|--name <mirror_name> | -c|--config <config_file>] [--days <days> | --all]
 mirror list
-mirror info [-n|--name <mirror_name> | -c|--config <config_file>] [-s|--snapshot <snapshot_id>]
+mirror info [-n|--name <mirror_name> | -u|--URL <repo_url> | -c|--config <config_file>] [-s|--snapshot <snapshot_id>]
+mirror more-info [-n|--name <mirror_name> | -c|--config <config_file>]
 mirror destroy [-n|--name <mirror_name> | -c|--config <config_file>]
 ```
 
@@ -138,35 +147,19 @@ with `gpg` default key behavior as the final fallback.
 
 ```bash
 go run . --help
+go run . config generate --URL http://us.archive.ubuntu.com/ubuntu/dists/bionic/Release
 go run . config validate -c ./chrome_stable.conf
 go run . config show -c ./chrome_stable.conf
 go run . config show -n chrome_stable
 go run . fetch -c ./chrome_stable.conf
 go run . update -c ./chrome_stable.conf
+go run . daily -n chrome_stable
 go run . rollback -n chrome_stable -d 2026-05-27
 go run . hide -n chrome_stable
+go run . cleanup -n chrome_stable
+go run . cleanup -n chrome_stable --days 30
+go run . cleanup -n chrome_stable --all
 go run . list
 go run . info -n chrome_stable
-```
-
-## Planned Command Shape
-
-```text
-mirror config generate -u|--URL <repo_url>
-mirror config validate -c|--config <config_file>
-mirror config show [-n|--name <mirror_name> | -c|--config <config_file>]
-
-mirror create -c|--config <config_file>
-mirror fetch -c|--config <config_file>
-mirror update -c|--config <config_file>
-mirror rollback [-n|--name <mirror_name> | -c|--config <config_file>] [-d|--date YYYY-MM-DD | -i|--id <snapshot_id>]
-mirror daily [-n|--name <mirror_name> | -c|--config <config_file>]
-mirror weekly [-n|--name <mirror_name> | -c|--config <config_file>]
-mirror monthly [-n|--name <mirror_name> | -c|--config <config_file>]
-mirror hide [-n|--name <mirror_name> | -c|--config <config_file>]
-mirror destroy [-n|--name <mirror_name> | -c|--config <config_file>]
-mirror cleanup [-n|--name <mirror_name> | -c|--config <config_file>] [--days <days> | --all]
-mirror list
-mirror info [-n|--name <mirror_name> | -u|--URL <repo_url> | -c|--config <config_file>] [-s|--snapshot <snapshot_id>]
-mirror more-info ...
+go run . more-info -n chrome_stable
 ```

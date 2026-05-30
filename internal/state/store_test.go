@@ -66,6 +66,7 @@ func TestSaveAndLoadMirrorConfig(t *testing.T) {
 	defer closeStore(t, store)
 
 	cfg := testConfig()
+	cfg.ConfigPath = "/etc/mirrors/ubuntu.conf"
 	if err := store.SaveMirrorConfig(cfg); err != nil {
 		t.Fatalf("SaveMirrorConfig returned error: %v", err)
 	}
@@ -91,6 +92,9 @@ func TestSaveAndLoadMirrorConfig(t *testing.T) {
 	}
 	if loaded.Path != "updated" || loaded.Merge.Depth != 2 {
 		t.Fatalf("config update was not persisted: %#v", loaded)
+	}
+	if loaded.ConfigPath != "/etc/mirrors/ubuntu.conf" {
+		t.Fatalf("config path was not persisted: %#v", loaded)
 	}
 	if !loaded.Signing.Disabled {
 		t.Fatalf("signing update was not persisted: %#v", loaded.Signing)
@@ -350,6 +354,60 @@ func TestCleanupReferenceQueries(t *testing.T) {
 	}
 	if !reflect.DeepEqual(paths, []string{"pool/pkg2.deb"}) {
 		t.Fatalf("unexpected unreferenced paths: %#v", paths)
+	}
+}
+
+func TestDeleteUnreferencedPackageRemovesOnlyUnusedRows(t *testing.T) {
+	store := openTempStore(t)
+	defer closeStore(t, store)
+	unused := upsertTestPackage(t, store, testPackage("unused", "pool/main/u/unused.deb"))
+	used := upsertTestPackage(t, store, testPackage("used", "pool/main/u/used.deb"))
+	if err := store.ReplaceMirrorPackages([]string{used}); err != nil {
+		t.Fatalf("ReplaceMirrorPackages returned error: %v", err)
+	}
+
+	if err := store.DeleteUnreferencedPackage("pool/main/u/used.deb"); err == nil {
+		t.Fatal("expected referenced package deletion to be rejected")
+	}
+	if err := store.DeleteUnreferencedPackage("pool/main/u/unused.deb"); err != nil {
+		t.Fatalf("DeleteUnreferencedPackage returned error: %v", err)
+	}
+	if _, err := store.Package(unused); err == nil {
+		t.Fatal("expected unused package row to be removed")
+	}
+	if _, err := store.Package(used); err != nil {
+		t.Fatalf("expected used package row to remain: %v", err)
+	}
+}
+
+func TestDeleteSnapshotsRemovesMembership(t *testing.T) {
+	store := openTempStore(t)
+	defer closeStore(t, store)
+	key := upsertTestPackage(t, store, testPackage("pkg", "pool/main/p/pkg.deb"))
+	if err := store.CreateSnapshot(SnapshotRecord{
+		Name:      "ubuntu-main_2026-05-28",
+		Kind:      "regular",
+		CreatedAt: testTime(),
+	}, []string{key}); err != nil {
+		t.Fatalf("CreateSnapshot returned error: %v", err)
+	}
+
+	if err := store.DeleteSnapshots([]string{"ubuntu-main_2026-05-28"}); err != nil {
+		t.Fatalf("DeleteSnapshots returned error: %v", err)
+	}
+	snapshots, err := store.Snapshots()
+	if err != nil {
+		t.Fatalf("Snapshots returned error: %v", err)
+	}
+	if len(snapshots) != 0 {
+		t.Fatalf("expected no snapshots, got %#v", snapshots)
+	}
+	keys, err := store.SnapshotPackageKeys("ubuntu-main_2026-05-28")
+	if err != nil {
+		t.Fatalf("SnapshotPackageKeys returned error: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("expected no snapshot package keys, got %#v", keys)
 	}
 }
 

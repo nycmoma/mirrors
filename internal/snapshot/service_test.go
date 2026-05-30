@@ -164,14 +164,14 @@ func TestListAndSnapshotLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if len(summaries) != 1 || summaries[0].Record.Name != snapshotName || summaries[0].PackageCount != 1 {
+	if len(summaries) != 1 || summaries[0].Record.Name != snapshotName || summaries[0].PackageCount != 1 || summaries[0].PackageSizeBytes == 0 {
 		t.Fatalf("unexpected summaries: %#v", summaries)
 	}
 	summary, err := service.Snapshot(cfg.Name, snapshotName)
 	if err != nil {
 		t.Fatalf("Snapshot returned error: %v", err)
 	}
-	if summary.Record.Name != snapshotName || summary.PackageCount != 1 {
+	if summary.Record.Name != snapshotName || summary.PackageCount != 1 || summary.PackageSizeBytes == 0 {
 		t.Fatalf("unexpected snapshot summary: %#v", summary)
 	}
 }

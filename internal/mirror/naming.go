@@ -1,13 +1,14 @@
 package mirror
 
-import "strings"
+import (
+	"strings"
+
+	"mirrors/internal/config"
+)
 
 // SuiteName maps a dist/release pair to an apt suite.
 func SuiteName(dist, release string) string {
-	if release == "" || release == "default" {
-		return dist
-	}
-	return dist + "-" + release
+	return config.SuiteName(dist, release)
 }
 
 // ComponentMirrorName returns the full internal mirror name.
