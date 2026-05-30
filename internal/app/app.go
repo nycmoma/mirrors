@@ -868,9 +868,10 @@ func cleanupSnapshotCandidates(snapshots []state.SnapshotRecord, cmd cli.Command
 	}
 
 	var candidates []string
+	preserved := cleanupPreservedSnapshots(publishedSnapshot)
 	for _, item := range snapshots {
 		itemDate := snapshotDate(item.Name)
-		if item.Name == publishedSnapshot || itemDate == publishedDate {
+		if preserved[item.Name] {
 			continue
 		}
 		if cmd.CleanupAll {
@@ -882,6 +883,19 @@ func cleanupSnapshotCandidates(snapshots []state.SnapshotRecord, cmd cli.Command
 		}
 	}
 	return candidates, cutoff, nil
+}
+
+func cleanupPreservedSnapshots(publishedSnapshot string) map[string]bool {
+	preserved := map[string]bool{
+		publishedSnapshot: true,
+	}
+	if strings.HasPrefix(publishedSnapshot, "MERGED-") {
+		regular := strings.TrimPrefix(publishedSnapshot, "MERGED-")
+		if regular != "" {
+			preserved[regular] = true
+		}
+	}
+	return preserved
 }
 
 func snapshotDate(name string) string {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -537,7 +538,7 @@ func TestRunCleanupRemoveDeletesStalePackageRow(t *testing.T) {
 	}
 }
 
-func TestRunCleanupAllPreservesPublishedDateGroup(t *testing.T) {
+func TestRunCleanupAllPreservesPublishedMergedPair(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	store := openAppTestStore(t, home, "ubuntu")
@@ -547,6 +548,7 @@ func TestRunCleanupAllPreservesPublishedDateGroup(t *testing.T) {
 	old := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	for _, name := range []string{
 		"ubuntu-focal-main_2026-04-01",
+		"MERGED-ubuntu-focal-main_2026-04-01",
 		"ubuntu-focal-universe_2026-04-01",
 		"ubuntu-focal-main_2026-03-31",
 	} {
@@ -555,7 +557,7 @@ func TestRunCleanupAllPreservesPublishedDateGroup(t *testing.T) {
 		}
 	}
 	if err := store.SetPublished(state.PublishedRecord{
-		SnapshotName: "ubuntu-focal-main_2026-04-01",
+		SnapshotName: "MERGED-ubuntu-focal-main_2026-04-01",
 		Path:         "preprod",
 		Suite:        "focal",
 		Component:    "main",
@@ -568,11 +570,17 @@ func TestRunCleanupAllPreservesPublishedDateGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runCleanup returned error: %v", err)
 	}
-	if !reflect.DeepEqual(result.SnapshotCandidates, []string{"ubuntu-focal-main_2026-03-31"}) {
+	if !reflect.DeepEqual(result.SnapshotCandidates, []string{"ubuntu-focal-main_2026-03-31", "ubuntu-focal-universe_2026-04-01"}) {
 		t.Fatalf("unexpected snapshot candidates: %#v", result.SnapshotCandidates)
 	}
-	if _, err := store.Snapshot("ubuntu-focal-universe_2026-04-01"); err != nil {
-		t.Fatalf("expected same-date published group snapshot to remain: %v", err)
+	if _, err := store.Snapshot("MERGED-ubuntu-focal-main_2026-04-01"); err != nil {
+		t.Fatalf("expected published merged snapshot to remain: %v", err)
+	}
+	if _, err := store.Snapshot("ubuntu-focal-main_2026-04-01"); err != nil {
+		t.Fatalf("expected regular companion snapshot to remain: %v", err)
+	}
+	if _, err := store.Snapshot("ubuntu-focal-universe_2026-04-01"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected unrelated same-date snapshot to be removed, got err=%v", err)
 	}
 }
 
