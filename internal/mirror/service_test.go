@@ -31,7 +31,7 @@ func TestFetchDownloadsPackagesAndIsIdempotent(t *testing.T) {
 	home := t.TempDir()
 	repo := newRepoFixture("http://repo.test/ubuntu", "1.0", "deb-v1")
 	downloader := newFakeDownloader(repo.files)
-	service := newTestService(t, home, downloader)
+	service := newTestService(t, home, downloader, WithDiskSpaceChecker(&fakeDiskSpaceChecker{available: 1024}))
 
 	result, err := service.Fetch(context.Background(), repo.config)
 	if err != nil {
@@ -39,6 +39,9 @@ func TestFetchDownloadsPackagesAndIsIdempotent(t *testing.T) {
 	}
 	if result.IndexCount != 1 || result.PackageCount != 1 || result.DownloadedCount != 1 || result.ReusedCount != 0 {
 		t.Fatalf("unexpected first fetch result: %#v", result)
+	}
+	if result.Plan.IndexesConsidered != 1 || result.Plan.PackagesToDownload != 1 || result.Plan.EstimatedDownloadBytes != int64(len("deb-v1")) {
+		t.Fatalf("unexpected first fetch plan: %#v", result.Plan)
 	}
 	if result.AddedPackageCount != 1 || result.RemovedPackageCount != 0 || result.Unchanged {
 		t.Fatalf("unexpected first fetch diff: %#v", result)
@@ -59,6 +62,9 @@ func TestFetchDownloadsPackagesAndIsIdempotent(t *testing.T) {
 	if result.DownloadedCount != 0 || result.ReusedCount != 1 || !result.Unchanged {
 		t.Fatalf("second fetch should reuse existing package: %#v", result)
 	}
+	if result.Plan.PackagesToDownload != 0 || result.Plan.EstimatedDownloadBytes != 0 || result.Plan.PackagesReused != 1 {
+		t.Fatalf("second fetch should plan zero download bytes: %#v", result.Plan)
+	}
 	if downloader.downloads[repo.packageURL] != 1 {
 		t.Fatalf("expected package file to be downloaded once, got %d", downloader.downloads[repo.packageURL])
 	}
@@ -77,6 +83,45 @@ func TestFetchDownloadsPackagesAndIsIdempotent(t *testing.T) {
 	}
 	if len(summaries) != 1 || summaries[0].Config.Name != repo.config.Name {
 		t.Fatalf("unexpected list summaries: %#v", summaries)
+	}
+}
+
+func TestFetchFailsBeforeDownloadWhenDiskSpaceIsInsufficient(t *testing.T) {
+	home := t.TempDir()
+	repo := newRepoFixture("http://repo.test/ubuntu", "1.0", "deb-v1")
+	downloader := newFakeDownloader(repo.files)
+	service := newTestService(t, home, downloader, WithDiskSpaceChecker(&fakeDiskSpaceChecker{available: 1}))
+
+	_, err := service.Fetch(context.Background(), repo.config)
+	if err == nil {
+		t.Fatal("expected insufficient disk space error")
+	}
+	if !strings.Contains(err.Error(), "not enough disk space") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if downloader.downloads[repo.packageURL] != 0 {
+		t.Fatalf("package download started despite insufficient disk space: %d", downloader.downloads[repo.packageURL])
+	}
+}
+
+func TestFetchAllowsUnknownPackageSizeWithPlanWarning(t *testing.T) {
+	home := t.TempDir()
+	repo := newRepoFixtureWithoutSize("http://repo.test/ubuntu", "1.0", "deb-v1")
+	downloader := newFakeDownloader(repo.files)
+	service := newTestService(t, home, downloader, WithDiskSpaceChecker(&fakeDiskSpaceChecker{available: 0}))
+
+	result, err := service.Fetch(context.Background(), repo.config)
+	if err != nil {
+		t.Fatalf("Fetch returned error: %v", err)
+	}
+	if result.Plan.UnknownSizePackages != 1 || result.Plan.EstimatedDownloadBytes != 0 || result.Plan.PackagesToDownload != 1 {
+		t.Fatalf("unexpected unknown-size plan: %#v", result.Plan)
+	}
+	if len(result.Plan.Warnings) == 0 || !strings.Contains(result.Plan.Warnings[0], "unknown size metadata") {
+		t.Fatalf("expected unknown-size warning, got %#v", result.Plan.Warnings)
+	}
+	if result.DownloadedCount != 1 {
+		t.Fatalf("expected unknown-size package to download, got result %#v", result)
 	}
 }
 
@@ -143,9 +188,11 @@ func TestDestroyRemovesMirrorState(t *testing.T) {
 	}
 }
 
-func newTestService(t *testing.T, home string, downloader download.Downloader) *Service {
+func newTestService(t *testing.T, home string, downloader download.Downloader, options ...Option) *Service {
 	t.Helper()
-	service, err := NewService(WithHome(home), WithDownloader(downloader))
+	serviceOptions := []Option{WithHome(home), WithDownloader(downloader)}
+	serviceOptions = append(serviceOptions, options...)
+	service, err := NewService(serviceOptions...)
 	if err != nil {
 		t.Fatalf("NewService returned error: %v", err)
 	}
@@ -159,19 +206,30 @@ type repoFixture struct {
 }
 
 func newRepoFixture(baseURL, version, packagePayload string) repoFixture {
+	return newRepoFixtureWithSize(baseURL, version, packagePayload, true)
+}
+
+func newRepoFixtureWithoutSize(baseURL, version, packagePayload string) repoFixture {
+	return newRepoFixtureWithSize(baseURL, version, packagePayload, false)
+}
+
+func newRepoFixtureWithSize(baseURL, version, packagePayload string, includeSize bool) repoFixture {
 	checksums := checksumBytes([]byte(packagePayload))
 	filename := fmt.Sprintf("pool/main/d/demo/demo_%s_amd64.deb", version)
+	sizeLine := ""
+	if includeSize {
+		sizeLine = fmt.Sprintf("Size: %d\n", len(packagePayload))
+	}
 	packages := fmt.Sprintf(`Package: demo
 Version: %s
 Architecture: amd64
 Filename: %s
-Size: %d
-MD5sum: %s
+%sMD5sum: %s
 SHA1: %s
 SHA256: %s
 SHA512: %s
 
-`, version, filename, len(packagePayload), checksums.MD5, checksums.SHA1, checksums.SHA256, checksums.SHA512)
+`, version, filename, sizeLine, checksums.MD5, checksums.SHA1, checksums.SHA256, checksums.SHA512)
 	packagesChecksum := checksumBytes([]byte(packages))
 
 	release := fmt.Sprintf(`Origin: Test
@@ -209,6 +267,15 @@ SHA256:
 		},
 		packageURL: packageURL,
 	}
+}
+
+type fakeDiskSpaceChecker struct {
+	available int64
+	err       error
+}
+
+func (c *fakeDiskSpaceChecker) AvailableBytes(_ string) (int64, error) {
+	return c.available, c.err
 }
 
 type fakeDownloader struct {

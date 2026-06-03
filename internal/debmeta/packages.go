@@ -84,7 +84,7 @@ func ParsePackages(r io.Reader) ([]Package, error) {
 // PackageFromStanza converts one Packages stanza into a typed package record.
 func PackageFromStanza(stanza Stanza) (Package, error) {
 	var missing []string
-	for _, field := range []string{"Package", "Version", "Architecture", "Filename", "Size"} {
+	for _, field := range []string{"Package", "Version", "Architecture", "Filename"} {
 		if strings.TrimSpace(stanza[field]) == "" {
 			missing = append(missing, field)
 		}
@@ -93,9 +93,13 @@ func PackageFromStanza(stanza Stanza) (Package, error) {
 		return Package{}, fmt.Errorf("missing required field(s): %s", strings.Join(missing, ", "))
 	}
 
-	size, err := strconv.ParseInt(stanza["Size"], 10, 64)
-	if err != nil {
-		return Package{}, fmt.Errorf("invalid Size %q: %w", stanza["Size"], err)
+	size := int64(-1)
+	if strings.TrimSpace(stanza["Size"]) != "" {
+		var err error
+		size, err = strconv.ParseInt(stanza["Size"], 10, 64)
+		if err != nil {
+			return Package{}, fmt.Errorf("invalid Size %q: %w", stanza["Size"], err)
+		}
 	}
 
 	filename := stanza["Filename"]

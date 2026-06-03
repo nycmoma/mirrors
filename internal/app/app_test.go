@@ -149,6 +149,40 @@ func TestRunConfigValidatePrintsUpstreamOriginAndLabel(t *testing.T) {
 	}
 }
 
+func TestPrintDownloadPlanIncludesEstimateAndWarnings(t *testing.T) {
+	output, err := captureStdout(func() error {
+		printDownloadPlan(mirror.DownloadPlan{
+			MirrorName:             "ubuntu",
+			PackagePoolRoot:        "/tmp/packages",
+			IndexesConsidered:      2,
+			PackagesReused:         3,
+			PackagesToDownload:     4,
+			EstimatedDownloadBytes: 2048,
+			AvailableBytes:         4096,
+			UnknownSizePackages:    1,
+			Warnings:               []string{"1 package(s) have unknown size metadata; estimated download size covers only packages with known sizes"},
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("captureStdout returned error: %v", err)
+	}
+	for _, want := range []string{
+		`Download plan for mirror "ubuntu"`,
+		"Indexes considered: 2",
+		"Packages reused: 3",
+		"Packages to download: 4",
+		"Estimated download size: 2.0 KiB",
+		"Packages with unknown size: 1",
+		"Available disk space: 4.0 KiB",
+		"Warning: 1 package(s) have unknown size metadata",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestValidateExistingMirrorConfigAllowsMatchingStoredConfig(t *testing.T) {
 	home := t.TempDir()
 	setAppTestHome(t, home)

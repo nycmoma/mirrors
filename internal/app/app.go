@@ -337,6 +337,7 @@ func newMirrorService(appCfg appconfig.Config) (*mirror.Service, error) {
 	return mirror.NewService(
 		mirror.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir()),
 		mirror.WithDownloader(appCfg.NewDownloader()),
+		mirror.WithDownloadPlanReporter(printDownloadPlan),
 	)
 }
 
@@ -1006,6 +1007,22 @@ func printFetchResult(action string, result mirror.FetchResult) {
 	fmt.Printf("Downloaded: %d\n", result.DownloadedCount)
 	fmt.Printf("Reused: %d\n", result.ReusedCount)
 	fmt.Printf("Changes: +%d -%d\n", result.AddedPackageCount, result.RemovedPackageCount)
+}
+
+func printDownloadPlan(plan mirror.DownloadPlan) {
+	fmt.Printf("Download plan for mirror %q\n", plan.MirrorName)
+	fmt.Printf("Package pool: %s\n", plan.PackagePoolRoot)
+	fmt.Printf("Indexes considered: %d\n", plan.IndexesConsidered)
+	fmt.Printf("Packages reused: %d\n", plan.PackagesReused)
+	fmt.Printf("Packages to download: %d\n", plan.PackagesToDownload)
+	fmt.Printf("Estimated download size: %s\n", humanSize(plan.EstimatedDownloadBytes))
+	if plan.UnknownSizePackages > 0 {
+		fmt.Printf("Packages with unknown size: %d\n", plan.UnknownSizePackages)
+	}
+	fmt.Printf("Available disk space: %s\n", humanSize(plan.AvailableBytes))
+	for _, warning := range plan.Warnings {
+		fmt.Printf("Warning: %s\n", warning)
+	}
 }
 
 func printConfigValidationResult(path string, cfg config.Mirror, upstream []config.UpstreamRelease) {

@@ -16,10 +16,12 @@ import (
 
 // Service coordinates mirror state, downloads, and package pool imports.
 type Service struct {
-	home       string
-	dbDir      string
-	packageDir string
-	downloader download.Downloader
+	home                 string
+	dbDir                string
+	packageDir           string
+	downloader           download.Downloader
+	diskChecker          DiskSpaceChecker
+	downloadPlanReporter func(DownloadPlan)
 }
 
 // Option configures a Service.
@@ -49,6 +51,20 @@ func WithDownloader(downloader download.Downloader) Option {
 	}
 }
 
+// WithDiskSpaceChecker sets the disk-space checker used before package downloads.
+func WithDiskSpaceChecker(checker DiskSpaceChecker) Option {
+	return func(service *Service) {
+		service.diskChecker = checker
+	}
+}
+
+// WithDownloadPlanReporter sets a callback invoked after planning and before package downloads.
+func WithDownloadPlanReporter(reporter func(DownloadPlan)) Option {
+	return func(service *Service) {
+		service.downloadPlanReporter = reporter
+	}
+}
+
 // NewService creates a mirror service.
 func NewService(options ...Option) (*Service, error) {
 	home, err := os.UserHomeDir()
@@ -56,10 +72,11 @@ func NewService(options ...Option) (*Service, error) {
 		return nil, err
 	}
 	service := &Service{
-		home:       home,
-		dbDir:      config.DBDirForHome(home),
-		packageDir: config.PackageDirForHome(home),
-		downloader: download.NewClient(),
+		home:        home,
+		dbDir:       config.DBDirForHome(home),
+		packageDir:  config.PackageDirForHome(home),
+		downloader:  download.NewClient(),
+		diskChecker: statfsDiskSpaceChecker{},
 	}
 	for _, option := range options {
 		option(service)
@@ -75,6 +92,9 @@ func NewService(options ...Option) (*Service, error) {
 	}
 	if service.downloader == nil {
 		return nil, fmt.Errorf("downloader is required")
+	}
+	if service.diskChecker == nil {
+		return nil, fmt.Errorf("disk space checker is required")
 	}
 	return service, nil
 }

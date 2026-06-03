@@ -21,6 +21,7 @@ import (
 type FetchResult struct {
 	MirrorName          string
 	DBPath              string
+	Plan                DownloadPlan
 	IndexCount          int
 	PackageCount        int
 	DownloadedCount     int
@@ -66,68 +67,44 @@ func (s *Service) Fetch(ctx context.Context, cfg config.Mirror) (FetchResult, er
 		return FetchResult{}, err
 	}
 
-	for _, dist := range cfg.Dists {
-		for _, release := range cfg.Releases {
-			suite := SuiteName(dist, release)
-			releaseMeta, err := s.fetchRelease(ctx, cfg.URL, suite)
+	plan, err := s.buildFetchPlan(ctx, cfg, packagePool)
+	if err != nil {
+		_ = recordFetchFailure(store, startedAt, err)
+		return FetchResult{}, err
+	}
+	result.Plan = plan.summary
+	if s.downloadPlanReporter != nil {
+		s.downloadPlanReporter(plan.summary)
+	}
+
+	for _, release := range plan.releases {
+		if err := store.UpsertUpstreamRelease(release.record); err != nil {
+			_ = recordFetchFailure(store, startedAt, err)
+			return FetchResult{}, err
+		}
+	}
+
+	for _, index := range plan.indexes {
+		if err := store.UpsertUpstreamIndex(index.record); err != nil {
+			_ = recordFetchFailure(store, startedAt, err)
+			return FetchResult{}, err
+		}
+		result.IndexCount++
+
+		for _, pkg := range index.packages {
+			key, reused, err := s.ensurePackage(ctx, cfg.URL, packagePool, store, pkg)
 			if err != nil {
 				_ = recordFetchFailure(store, startedAt, err)
 				return FetchResult{}, err
 			}
-			if err := validateRelease(releaseMeta, cfg, suite); err != nil {
-				_ = recordFetchFailure(store, startedAt, err)
-				return FetchResult{}, err
+			if reused {
+				result.ReusedCount++
+			} else {
+				result.DownloadedCount++
 			}
-			if err := store.UpsertUpstreamRelease(state.UpstreamReleaseRecord{
-				Suite:     suite,
-				Origin:    releaseMeta.Origin,
-				Label:     releaseMeta.Label,
-				FetchedAt: time.Now(),
-			}); err != nil {
-				_ = recordFetchFailure(store, startedAt, err)
-				return FetchResult{}, err
-			}
-
-			for _, component := range cfg.Components {
-				if !contains(releaseMeta.Components, component) {
-					err := fmt.Errorf("suite %q does not contain component %q", suite, component)
-					_ = recordFetchFailure(store, startedAt, err)
-					return FetchResult{}, err
-				}
-				for _, arch := range cfg.Arch {
-					if !contains(releaseMeta.Architectures, arch) {
-						err := fmt.Errorf("suite %q does not contain architecture %q", suite, arch)
-						_ = recordFetchFailure(store, startedAt, err)
-						return FetchResult{}, err
-					}
-					indexPackages, indexRecord, err := s.fetchPackageIndex(ctx, cfg.URL, suite, component, arch, releaseMeta)
-					if err != nil {
-						_ = recordFetchFailure(store, startedAt, err)
-						return FetchResult{}, err
-					}
-					if err := store.UpsertUpstreamIndex(indexRecord); err != nil {
-						_ = recordFetchFailure(store, startedAt, err)
-						return FetchResult{}, err
-					}
-					result.IndexCount++
-
-					for _, pkg := range indexPackages {
-						key, reused, err := s.ensurePackage(ctx, cfg.URL, packagePool, store, pkg)
-						if err != nil {
-							_ = recordFetchFailure(store, startedAt, err)
-							return FetchResult{}, err
-						}
-						if reused {
-							result.ReusedCount++
-						} else {
-							result.DownloadedCount++
-						}
-						if !seen[key] {
-							seen[key] = true
-							packageKeys = append(packageKeys, key)
-						}
-					}
-				}
+			if !seen[key] {
+				seen[key] = true
+				packageKeys = append(packageKeys, key)
 			}
 		}
 	}
@@ -150,6 +127,101 @@ func (s *Service) Fetch(ctx context.Context, cfg config.Mirror) (FetchResult, er
 	result.AddedPackageCount, result.RemovedPackageCount = packageSetDiff(oldKeys, packageKeys)
 	result.Unchanged = result.AddedPackageCount == 0 && result.RemovedPackageCount == 0
 	return result, nil
+}
+
+func (s *Service) buildFetchPlan(ctx context.Context, cfg config.Mirror, packagePool *pool.Pool) (fetchPlan, error) {
+	plan := fetchPlan{
+		summary: DownloadPlan{
+			MirrorName:      cfg.Name,
+			DBPath:          s.dbPath(cfg.Name),
+			PackagePoolRoot: cleanPoolRoot(packagePool.Root()),
+		},
+		packagePool:    packagePool,
+		seenDownloadID: map[string]bool{},
+	}
+
+	for _, dist := range cfg.Dists {
+		for _, release := range cfg.Releases {
+			suite := SuiteName(dist, release)
+			releaseMeta, err := s.fetchRelease(ctx, cfg.URL, suite)
+			if err != nil {
+				return fetchPlan{}, err
+			}
+			if err := validateRelease(releaseMeta, cfg, suite); err != nil {
+				return fetchPlan{}, err
+			}
+			plan.releases = append(plan.releases, plannedRelease{record: state.UpstreamReleaseRecord{
+				Suite:     suite,
+				Origin:    releaseMeta.Origin,
+				Label:     releaseMeta.Label,
+				FetchedAt: time.Now(),
+			}})
+
+			for _, component := range cfg.Components {
+				if !contains(releaseMeta.Components, component) {
+					return fetchPlan{}, fmt.Errorf("suite %q does not contain component %q", suite, component)
+				}
+				for _, arch := range cfg.Arch {
+					if !contains(releaseMeta.Architectures, arch) {
+						return fetchPlan{}, fmt.Errorf("suite %q does not contain architecture %q", suite, arch)
+					}
+					indexPackages, indexRecord, err := s.fetchPackageIndex(ctx, cfg.URL, suite, component, arch, releaseMeta)
+					if err != nil {
+						return fetchPlan{}, err
+					}
+					plan.summary.IndexesConsidered++
+					plan.indexes = append(plan.indexes, plannedIndex{
+						record:   indexRecord,
+						packages: indexPackages,
+					})
+					for _, pkg := range indexPackages {
+						if err := plan.addPackageCandidate(pkg); err != nil {
+							return fetchPlan{}, err
+						}
+					}
+				}
+			}
+		}
+	}
+
+	available, err := s.diskChecker.AvailableBytes(packagePool.Root())
+	if err != nil {
+		return fetchPlan{}, fmt.Errorf("check available disk space at %s: %w", packagePool.Root(), err)
+	}
+	plan.summary.AvailableBytes = available
+	if plan.summary.EstimatedDownloadBytes > available {
+		return fetchPlan{}, fmt.Errorf("not enough disk space in package pool %q: need %d bytes, available %d bytes", packagePool.Root(), plan.summary.EstimatedDownloadBytes, available)
+	}
+	plan.summary.Warnings = plan.summary.WarningsWithUnknownSize()
+	return plan, nil
+}
+
+func (plan *fetchPlan) addPackageCandidate(pkg debmeta.Package) error {
+	expectedPoolChecksum := poolChecksum(pkg)
+	poolPath, err := pool.PathFor(pkg.Filename, expectedPoolChecksum)
+	if err == nil {
+		ok, err := plan.packagePool.Verify(poolPath, expectedPoolChecksum)
+		if err != nil {
+			return err
+		}
+		if ok {
+			plan.summary.PackagesReused++
+			return nil
+		}
+	}
+
+	identity := packageIdentity(pkg)
+	if plan.seenDownloadID[identity] {
+		return nil
+	}
+	plan.seenDownloadID[identity] = true
+	plan.summary.PackagesToDownload++
+	if pkg.Size >= 0 {
+		plan.summary.EstimatedDownloadBytes += pkg.Size
+	} else {
+		plan.summary.UnknownSizePackages++
+	}
+	return nil
 }
 
 func (s *Service) fetchRelease(ctx context.Context, baseURL, suite string) (*debmeta.Release, error) {

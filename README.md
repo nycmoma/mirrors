@@ -11,10 +11,10 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 12: Global App Config
+Phase 13: Update Planning and Disk Safety
 ```
 
-Phase 13 update planning and disk-safety work is next.
+Phase 14 download concurrency and progress work is next.
 
 Implemented packages and behavior:
 
@@ -57,6 +57,8 @@ Implemented packages and behavior:
 - Mirror service support in `internal/mirror`:
   - upstream Release and Packages index URL resolution
   - Release validation for configured origin, label, components, and architectures
+  - download planning before package downloads
+  - disk-space checking before package downloads
   - package index fetching and parsing
   - missing package downloads into the local package pool
   - idempotent package reuse when files already exist in the pool
@@ -89,6 +91,7 @@ Implemented packages and behavior:
 - App workflow support in `internal/app` currently includes:
   - `config generate` starter config rendering from a Release/InRelease URL
   - global application config loading and validation
+  - download estimate output for package-consuming workflows
   - `daily`, `weekly`, and `monthly` update workflow aliases
   - cleanup summary reporting for snapshots and unreferenced package pool files
   - cleanup retention with `--days` or `--all`

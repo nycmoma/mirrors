@@ -70,6 +70,22 @@ Size: 12
 	}
 }
 
+func TestParsePackagesAllowsMissingSize(t *testing.T) {
+	packages, err := ParsePackages(strings.NewReader(`Package: demo
+Version: 1.0
+Architecture: amd64
+Filename: pool/main/d/demo/demo_1.0_amd64.deb
+SHA256: abc
+
+`))
+	if err != nil {
+		t.Fatalf("ParsePackages returned error: %v", err)
+	}
+	if len(packages) != 1 || packages[0].Size != -1 {
+		t.Fatalf("expected one package with unknown size sentinel, got %#v", packages)
+	}
+}
+
 func TestParsePackagesFileSupportsGzipAndXZ(t *testing.T) {
 	dir := t.TempDir()
 

@@ -52,7 +52,7 @@ func verifyChecksum(url string, actual Checksum, expected *Checksum) error {
 		return nil
 	}
 
-	if actual.Size != expected.Size {
+	if expected.Size >= 0 && actual.Size != expected.Size {
 		return fmt.Errorf("%s: size mismatch %d != %d", url, actual.Size, expected.Size)
 	}
 	if expected.MD5 != "" && !sameHash(actual.MD5, expected.MD5) {
