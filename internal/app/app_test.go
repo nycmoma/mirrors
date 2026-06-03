@@ -13,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"mirrors/internal/appconfig"
 	"mirrors/internal/cli"
 	"mirrors/internal/config"
+	"mirrors/internal/download"
 	"mirrors/internal/mirror"
 	"mirrors/internal/state"
 
@@ -22,6 +24,7 @@ import (
 )
 
 func TestRunMirrorCommandRejectsAmbiguousIdentity(t *testing.T) {
+	isolateAppConfig(t)
 	err := runMirrorCommand(cli.Command{
 		Name:       "info",
 		ConfigPath: "mirror.conf",
@@ -36,6 +39,7 @@ func TestRunMirrorCommandRejectsAmbiguousIdentity(t *testing.T) {
 }
 
 func TestRunMirrorCommandRequiresIdentity(t *testing.T) {
+	isolateAppConfig(t)
 	err := runMirrorCommand(cli.Command{Name: "info"})
 	if err == nil {
 		t.Fatal("expected missing identity error")
@@ -58,8 +62,9 @@ func TestNotImplementedReportsPlannedPhase(t *testing.T) {
 }
 
 func TestRunConfigGenerate(t *testing.T) {
+	isolateAppConfig(t)
 	oldGenerate := generateConfig
-	generateConfig = func(rawURL string) (config.Mirror, error) {
+	generateConfig = func(_ context.Context, rawURL string, _ download.Downloader) (config.Mirror, error) {
 		if rawURL != "https://archive.example.test/ubuntu/dists/jammy-updates/Release" {
 			t.Fatalf("unexpected generate URL: %q", rawURL)
 		}
@@ -106,8 +111,9 @@ func TestRunConfigGenerate(t *testing.T) {
 }
 
 func TestRunConfigValidatePrintsUpstreamOriginAndLabel(t *testing.T) {
+	isolateAppConfig(t)
 	oldValidate := validateConfig
-	validateConfig = func(_ context.Context, cfg config.Mirror) ([]config.UpstreamRelease, error) {
+	validateConfig = func(_ context.Context, _ appconfig.Config, cfg config.Mirror) ([]config.UpstreamRelease, error) {
 		if cfg.Name != "ubuntu" {
 			t.Fatalf("unexpected config: %#v", cfg)
 		}
@@ -145,7 +151,7 @@ func TestRunConfigValidatePrintsUpstreamOriginAndLabel(t *testing.T) {
 
 func TestValidateExistingMirrorConfigAllowsMatchingStoredConfig(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -165,7 +171,7 @@ func TestValidateExistingMirrorConfigAllowsMatchingStoredConfig(t *testing.T) {
 
 func TestValidateExistingMirrorConfigAllowsSameConfigPath(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -187,7 +193,7 @@ func TestValidateExistingMirrorConfigAllowsSameConfigPath(t *testing.T) {
 
 func TestValidateExistingMirrorConfigRejectsDifferentStoredConfig(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -206,6 +212,7 @@ func TestValidateExistingMirrorConfigRejectsDifferentStoredConfig(t *testing.T) 
 }
 
 func TestRunConfigShowRejectsAmbiguousIdentity(t *testing.T) {
+	isolateAppConfig(t)
 	err := runConfig(cli.Command{
 		Name:       "config",
 		Subcommand: "show",
@@ -221,6 +228,7 @@ func TestRunConfigShowRejectsAmbiguousIdentity(t *testing.T) {
 }
 
 func TestRunConfigShowByPath(t *testing.T) {
+	isolateAppConfig(t)
 	output, err := captureStdout(func() error {
 		return runConfig(cli.Command{
 			Name:       "config",
@@ -246,8 +254,8 @@ func TestRunConfigShowByPath(t *testing.T) {
 
 func TestRunConfigShowByName(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	createMirrorDB(t, config.DBPathForHome(home, "ubuntu"))
+	appCfg := setAppTestHome(t, home)
+	createMirrorDB(t, appCfg.DBPath("ubuntu"))
 
 	output, err := captureStdout(func() error {
 		return runConfig(cli.Command{
@@ -271,9 +279,31 @@ func TestRunConfigShowByName(t *testing.T) {
 	}
 }
 
+func TestRunConfigShowByNameUsesAppConfigDataRoot(t *testing.T) {
+	appCfg := appconfig.Default()
+	appCfg.DataRoot = t.TempDir()
+	appCfg.MirrorsRoot = t.TempDir()
+	appCfg.LogsRoot = t.TempDir()
+	createMirrorDB(t, appCfg.DBPath("ubuntu"))
+
+	output, err := captureStdout(func() error {
+		return runConfigWithConfig(cli.Command{
+			Name:       "config",
+			Subcommand: "show",
+			NameRef:    "ubuntu",
+		}, appCfg)
+	})
+	if err != nil {
+		t.Fatalf("runConfigWithConfig returned error: %v", err)
+	}
+	if !strings.Contains(output, "name = ubuntu") {
+		t.Fatalf("output missing mirror config:\n%s", output)
+	}
+}
+
 func TestPeriodicShouldRunSkipsRecentPublishedSnapshot(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -295,7 +325,7 @@ func TestPeriodicShouldRunSkipsRecentPublishedSnapshot(t *testing.T) {
 
 func TestPeriodicShouldRunWithoutPublishedSnapshot(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -312,14 +342,14 @@ func TestPeriodicShouldRunWithoutPublishedSnapshot(t *testing.T) {
 
 func TestSummariesByURLReturnsAllMatches(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	appCfg := setAppTestHome(t, home)
 	first := openAppTestStore(t, home, "ubuntu-one")
 	second := openAppTestStore(t, home, "ubuntu-two")
 	defer func() {
 		_ = first.Close()
 		_ = second.Close()
 	}()
-	service, err := mirror.NewService(mirror.WithHome(home))
+	service, err := mirror.NewService(mirror.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir()))
 	if err != nil {
 		t.Fatalf("NewService returned error: %v", err)
 	}
@@ -339,7 +369,7 @@ func TestSummariesByURLReturnsAllMatches(t *testing.T) {
 
 func TestRunInfoReportsMirrorAndSnapshotSizes(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -392,7 +422,7 @@ func TestRunInfoReportsMirrorAndSnapshotSizes(t *testing.T) {
 
 func TestRunMoreInfoOnlyListsPackages(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -452,7 +482,7 @@ func TestRunMoreInfoOnlyListsPackages(t *testing.T) {
 
 func TestRunCleanupDryRunReportsUnreferencedPackages(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -476,7 +506,7 @@ func TestRunCleanupDryRunReportsUnreferencedPackages(t *testing.T) {
 
 func TestRunCleanupRemoveDeletesPackageFile(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	appCfg := setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -484,7 +514,7 @@ func TestRunCleanupRemoveDeletesPackageFile(t *testing.T) {
 	seedPublishedSnapshot(t, store, "ubuntu-focal-main_2026-05-28")
 	poolPath := "pool/main/u/unused/unused.deb"
 	upsertAppTestPackage(t, store, "unused", poolPath)
-	fullPath := filepath.Join(config.PackageDirForHome(home), filepath.FromSlash(poolPath))
+	fullPath := filepath.Join(appCfg.PackageDir(), filepath.FromSlash(poolPath))
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		t.Fatalf("MkdirAll returned error: %v", err)
 	}
@@ -513,7 +543,7 @@ func TestRunCleanupRemoveDeletesPackageFile(t *testing.T) {
 
 func TestRunCleanupRemoveDeletesStalePackageRow(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -540,7 +570,7 @@ func TestRunCleanupRemoveDeletesStalePackageRow(t *testing.T) {
 
 func TestRunCleanupAllPreservesPublishedMergedPair(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -586,7 +616,7 @@ func TestRunCleanupAllPreservesPublishedMergedPair(t *testing.T) {
 
 func TestRunCleanupDaysUsesPublishedSnapshotDate(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setAppTestHome(t, home)
 	store := openAppTestStore(t, home, "ubuntu")
 	defer func() {
 		_ = store.Close()
@@ -627,7 +657,7 @@ func TestRunCleanupDaysUsesPublishedSnapshotDate(t *testing.T) {
 
 func TestRunDestroyRemovesOnlyUnsharedPackages(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	appCfg := setAppTestHome(t, home)
 	first := openAppTestStore(t, home, "ubuntu-one")
 	second := openAppTestStore(t, home, "ubuntu-two")
 	defer func() {
@@ -649,13 +679,13 @@ func TestRunDestroyRemovesOnlyUnsharedPackages(t *testing.T) {
 	if result.PackageFiles != 1 || result.SharedPreserved != 1 {
 		t.Fatalf("unexpected destroy result: %#v", result)
 	}
-	if _, err := os.Stat(config.DBPathForHome(home, "ubuntu-one")); !os.IsNotExist(err) {
+	if _, err := os.Stat(appCfg.DBPath("ubuntu-one")); !os.IsNotExist(err) {
 		t.Fatalf("expected destroyed DB to be removed, stat err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(config.PackageDirForHome(home), filepath.FromSlash(ownedPath))); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(appCfg.PackageDir(), filepath.FromSlash(ownedPath))); !os.IsNotExist(err) {
 		t.Fatalf("expected owned package to be removed, stat err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(config.PackageDirForHome(home), filepath.FromSlash(sharedPath))); err != nil {
+	if _, err := os.Stat(filepath.Join(appCfg.PackageDir(), filepath.FromSlash(sharedPath))); err != nil {
 		t.Fatalf("expected shared package to remain: %v", err)
 	}
 }
@@ -683,9 +713,24 @@ gpg_passphrase = 1234
 	return path
 }
 
+func isolateAppConfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+}
+
+func setAppTestHome(t *testing.T, home string) appconfig.Config {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	return appconfig.Default()
+}
+
 func openAppTestStore(t *testing.T, home, name string) *state.Store {
 	t.Helper()
-	store, err := state.Open(config.DBPathForHome(home, name))
+	appCfg := appconfig.Default()
+	store, err := state.Open(appCfg.DBPath(name))
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -707,7 +752,8 @@ func openAppTestStore(t *testing.T, home, name string) *state.Store {
 
 func writePoolFile(t *testing.T, home, poolPath, content string) {
 	t.Helper()
-	fullPath := filepath.Join(config.PackageDirForHome(home), filepath.FromSlash(poolPath))
+	appCfg := appconfig.Default()
+	fullPath := filepath.Join(appCfg.PackageDir(), filepath.FromSlash(poolPath))
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		t.Fatalf("MkdirAll returned error: %v", err)
 	}

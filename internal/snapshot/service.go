@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -21,8 +22,9 @@ const (
 
 // Service coordinates snapshot creation, merge selection, and rollback state.
 type Service struct {
-	home string
-	now  func() time.Time
+	home  string
+	dbDir string
+	now   func() time.Time
 }
 
 // Option configures a Service.
@@ -32,6 +34,14 @@ type Option func(*Service)
 func WithHome(home string) Option {
 	return func(service *Service) {
 		service.home = home
+		service.dbDir = config.DBDirForHome(home)
+	}
+}
+
+// WithDBDir sets an explicit DB directory.
+func WithDBDir(dbDir string) Option {
+	return func(service *Service) {
+		service.dbDir = dbDir
 	}
 }
 
@@ -49,14 +59,18 @@ func NewService(options ...Option) (*Service, error) {
 		return nil, err
 	}
 	service := &Service{
-		home: home,
-		now:  time.Now,
+		home:  home,
+		dbDir: config.DBDirForHome(home),
+		now:   time.Now,
 	}
 	for _, option := range options {
 		option(service)
 	}
 	if strings.TrimSpace(service.home) == "" {
 		return nil, fmt.Errorf("home directory is required")
+	}
+	if strings.TrimSpace(service.dbDir) == "" {
+		return nil, fmt.Errorf("DB directory is required")
 	}
 	if service.now == nil {
 		return nil, fmt.Errorf("clock is required")
@@ -567,5 +581,5 @@ func firstComponent(cfg config.Mirror) string {
 }
 
 func (s *Service) dbPath(name string) string {
-	return config.DBPathForHome(s.home, name)
+	return filepath.Join(s.dbDir, name+".sqlite")
 }

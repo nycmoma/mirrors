@@ -11,10 +11,10 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 10: Signing
+Phase 12: Global App Config
 ```
 
-Phase 11 app workflows are in progress.
+Phase 13 update planning and disk-safety work is next.
 
 Implemented packages and behavior:
 
@@ -36,7 +36,7 @@ Implemented packages and behavior:
   - `HEAD` length lookup
   - testable downloader interface
 - Package pool support in `internal/pool`:
-  - checksum-based storage layout under `~/.mirrors/packages/`
+  - checksum-based storage layout under the configured package pool root
   - package import with size and checksum verification
   - duplicate package detection
   - existing package verification
@@ -75,7 +75,7 @@ Implemented packages and behavior:
   - `Packages` and `Packages.gz` generation from stored upstream stanza data
   - unsigned `Release` metadata generation
   - upstream or explicit origin/label selection
-  - home-relative publish paths
+  - configured-root-relative publish paths
   - package hardlinking from the local package pool with copy fallback
   - publish switching for create, update, and rollback
   - hide/unpublish while preserving mirror state, snapshots, and packages
@@ -88,11 +88,40 @@ Implemented packages and behavior:
   - stale signature removal before each signing attempt
 - App workflow support in `internal/app` currently includes:
   - `config generate` starter config rendering from a Release/InRelease URL
+  - global application config loading and validation
   - `daily`, `weekly`, and `monthly` update workflow aliases
   - cleanup summary reporting for snapshots and unreferenced package pool files
   - cleanup retention with `--days` or `--all`
   - published snapshot preservation during cleanup
   - expanded `more-info` output
+
+## Global Config
+
+The app reads global defaults from:
+
+```text
+$XDG_CONFIG_HOME/mirrors.conf
+~/.config/mirrors.conf
+```
+
+If no global config exists, the app tries to create one with these defaults:
+
+```ini
+[app]
+data_root = ~/.mirrors/.data
+mirrors_root = ~/.mirrors/mirrors
+logs_root = ~/.mirrors/.logs
+http_timeout = 30s
+http_retries = 3
+http_retry_delay = 1s
+download_threads = 1
+```
+
+`data_root` stores SQLite DB files under `db/` and package files under
+`packages/`. `mirrors_root` is the base directory for relative publish paths.
+The app creates missing root directories and requires `data_root`,
+`mirrors_root`, and `logs_root` to be directories and writable before startup
+continues.
 
 ## Available Actions
 
@@ -122,7 +151,7 @@ mirror destroy [-n|--name <mirror_name> | -c|--config <config_file>]
 `config show -n` reads normalized config data from:
 
 ```text
-~/.mirrors/db/<mirror_name>.sqlite
+~/.mirrors/.data/db/<mirror_name>.sqlite
 ```
 
 New DB files are created automatically when the state package opens a mirror
@@ -146,20 +175,20 @@ with `gpg` default key behavior as the final fallback.
 ## Usage Examples
 
 ```bash
-go run . --help
-go run . config generate --URL http://us.archive.ubuntu.com/ubuntu/dists/bionic/Release
-go run . config validate -c ./chrome_stable.conf
-go run . config show -c ./chrome_stable.conf
-go run . config show -n chrome_stable
-go run . fetch -c ./chrome_stable.conf
-go run . update -c ./chrome_stable.conf
-go run . daily -n chrome_stable
-go run . rollback -n chrome_stable -d 2026-05-27
-go run . hide -n chrome_stable
-go run . cleanup -n chrome_stable
-go run . cleanup -n chrome_stable --days 30
-go run . cleanup -n chrome_stable --all
-go run . list
-go run . info -n chrome_stable
-go run . more-info -n chrome_stable
+mirror --help
+mirror config generate --URL http://us.archive.ubuntu.com/ubuntu/dists/bionic/Release
+mirror config validate -c ./chrome_stable.conf
+mirror config show -c ./chrome_stable.conf
+mirror config show -n chrome_stable
+mirror fetch -c ./chrome_stable.conf
+mirror update -c ./chrome_stable.conf
+mirror daily -n chrome_stable
+mirror rollback -n chrome_stable -d 2026-05-27
+mirror hide -n chrome_stable
+mirror cleanup -n chrome_stable
+mirror cleanup -n chrome_stable --days 30
+mirror cleanup -n chrome_stable --all
+mirror list
+mirror info -n chrome_stable
+mirror more-info -n chrome_stable
 ```

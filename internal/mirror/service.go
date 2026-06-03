@@ -17,6 +17,8 @@ import (
 // Service coordinates mirror state, downloads, and package pool imports.
 type Service struct {
 	home       string
+	dbDir      string
+	packageDir string
 	downloader download.Downloader
 }
 
@@ -27,6 +29,16 @@ type Option func(*Service)
 func WithHome(home string) Option {
 	return func(service *Service) {
 		service.home = home
+		service.dbDir = config.DBDirForHome(home)
+		service.packageDir = config.PackageDirForHome(home)
+	}
+}
+
+// WithStorageDirs sets explicit storage directories for DB files and packages.
+func WithStorageDirs(dbDir, packageDir string) Option {
+	return func(service *Service) {
+		service.dbDir = dbDir
+		service.packageDir = packageDir
 	}
 }
 
@@ -45,6 +57,8 @@ func NewService(options ...Option) (*Service, error) {
 	}
 	service := &Service{
 		home:       home,
+		dbDir:      config.DBDirForHome(home),
+		packageDir: config.PackageDirForHome(home),
 		downloader: download.NewClient(),
 	}
 	for _, option := range options {
@@ -52,6 +66,12 @@ func NewService(options ...Option) (*Service, error) {
 	}
 	if strings.TrimSpace(service.home) == "" {
 		return nil, fmt.Errorf("home directory is required")
+	}
+	if strings.TrimSpace(service.dbDir) == "" {
+		return nil, fmt.Errorf("DB directory is required")
+	}
+	if strings.TrimSpace(service.packageDir) == "" {
+		return nil, fmt.Errorf("package directory is required")
 	}
 	if service.downloader == nil {
 		return nil, fmt.Errorf("downloader is required")
@@ -101,7 +121,7 @@ func (s *Service) Info(name string) (Summary, error) {
 
 // List returns summaries for existing mirror DB files.
 func (s *Service) List() ([]Summary, error) {
-	entries, err := os.ReadDir(config.DBDirForHome(s.home))
+	entries, err := os.ReadDir(s.dbDir)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -140,9 +160,9 @@ func (s *Service) Destroy(name string) error {
 }
 
 func (s *Service) dbPath(name string) string {
-	return config.DBPathForHome(s.home, name)
+	return filepath.Join(s.dbDir, name+".sqlite")
 }
 
 func (s *Service) packagePool() (*pool.Pool, error) {
-	return pool.New(config.PackageDirForHome(s.home))
+	return pool.New(s.packageDir)
 }

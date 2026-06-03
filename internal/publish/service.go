@@ -24,8 +24,11 @@ import (
 
 // Service generates unsigned apt repository output for selected snapshots.
 type Service struct {
-	home string
-	now  func() time.Time
+	home        string
+	dbDir       string
+	packageDir  string
+	mirrorsRoot string
+	now         func() time.Time
 }
 
 // Option configures a Service.
@@ -35,6 +38,18 @@ type Option func(*Service)
 func WithHome(home string) Option {
 	return func(service *Service) {
 		service.home = home
+		service.dbDir = config.DBDirForHome(home)
+		service.packageDir = config.PackageDirForHome(home)
+		service.mirrorsRoot = home
+	}
+}
+
+// WithStorageDirs sets explicit directories for DB files, packages, and published mirrors.
+func WithStorageDirs(dbDir, packageDir, mirrorsRoot string) Option {
+	return func(service *Service) {
+		service.dbDir = dbDir
+		service.packageDir = packageDir
+		service.mirrorsRoot = mirrorsRoot
 	}
 }
 
@@ -51,12 +66,27 @@ func NewService(options ...Option) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	service := &Service{home: home, now: time.Now}
+	service := &Service{
+		home:        home,
+		dbDir:       config.DBDirForHome(home),
+		packageDir:  config.PackageDirForHome(home),
+		mirrorsRoot: home,
+		now:         time.Now,
+	}
 	for _, option := range options {
 		option(service)
 	}
 	if strings.TrimSpace(service.home) == "" {
 		return nil, fmt.Errorf("home directory is required")
+	}
+	if strings.TrimSpace(service.dbDir) == "" {
+		return nil, fmt.Errorf("DB directory is required")
+	}
+	if strings.TrimSpace(service.packageDir) == "" {
+		return nil, fmt.Errorf("package directory is required")
+	}
+	if strings.TrimSpace(service.mirrorsRoot) == "" {
+		return nil, fmt.Errorf("mirrors root is required")
 	}
 	if service.now == nil {
 		return nil, fmt.Errorf("clock is required")
@@ -276,7 +306,7 @@ func (s *Service) publishPackage(root string, pkg state.PackageRecord) error {
 	if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("invalid package filename %q", filename)
 	}
-	source := filepath.Join(config.PackageDirForHome(s.home), filepath.FromSlash(pkg.PoolPath))
+	source := filepath.Join(s.packageDir, filepath.FromSlash(pkg.PoolPath))
 	destination := filepath.Join(root, filepath.FromSlash(clean))
 	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
 		return err
@@ -351,7 +381,7 @@ func (s *Service) publishRoot(path string) (string, error) {
 	if filepath.IsAbs(path) {
 		return filepath.Clean(path), nil
 	}
-	return filepath.Join(s.home, filepath.Clean(path)), nil
+	return filepath.Join(s.mirrorsRoot, filepath.Clean(path)), nil
 }
 
 type indexKey struct {
@@ -587,5 +617,5 @@ func sha512Hex(data []byte) string {
 }
 
 func (s *Service) dbPath(name string) string {
-	return config.DBPathForHome(s.home, name)
+	return filepath.Join(s.dbDir, name+".sqlite")
 }

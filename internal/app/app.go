@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"mirrors/internal/appconfig"
 	"mirrors/internal/cli"
 	"mirrors/internal/config"
 	"mirrors/internal/download"
@@ -22,8 +23,11 @@ import (
 	"mirrors/internal/state"
 )
 
-var generateConfig = config.Generate
+var generateConfig = func(ctx context.Context, rawURL string, downloader download.Downloader) (config.Mirror, error) {
+	return config.GenerateWithDownloader(ctx, rawURL, downloader)
+}
 var validateConfig = validateConfigWorkflow
+var loadAppConfig = appconfig.Load
 
 // Run is the top-level application entrypoint used by main.
 func Run(args []string) error {
@@ -37,31 +41,43 @@ func Run(args []string) error {
 		return nil
 	}
 
-	return dispatch(cmd)
+	appCfg, err := loadAppConfig()
+	if err != nil {
+		return err
+	}
+	return dispatch(cmd, appCfg)
 }
 
-func dispatch(cmd cli.Command) error {
+func dispatch(cmd cli.Command, appCfg appconfig.Config) error {
 	switch cmd.Name {
 	case "config":
-		return runConfig(cmd)
+		return runConfigWithConfig(cmd, appCfg)
 	case "create", "fetch", "update":
-		return runConfigDrivenMirrorCommand(cmd)
+		return runConfigDrivenMirrorCommand(cmd, appCfg)
 	case "rollback", "daily", "weekly", "monthly", "hide", "destroy", "cleanup", "info", "more-info":
-		return runMirrorCommand(cmd)
+		return runMirrorCommandWithConfig(cmd, appCfg)
 	case "list":
-		return runList(cmd)
+		return runListWithConfig(cmd, appCfg)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd.Name, cli.HelpText())
 	}
 }
 
 func runConfig(cmd cli.Command) error {
+	appCfg, err := loadAppConfig()
+	if err != nil {
+		return err
+	}
+	return runConfigWithConfig(cmd, appCfg)
+}
+
+func runConfigWithConfig(cmd cli.Command, appCfg appconfig.Config) error {
 	switch cmd.Subcommand {
 	case "generate":
 		if cmd.URL == "" {
 			return fmt.Errorf("missing URL. Use: mirror config generate --URL <release_url>")
 		}
-		cfg, err := generateConfig(cmd.URL)
+		cfg, err := generateConfig(context.Background(), cmd.URL, appCfg.NewDownloader())
 		if err != nil {
 			return err
 		}
@@ -75,7 +91,7 @@ func runConfig(cmd cli.Command) error {
 		if err != nil {
 			return err
 		}
-		upstream, err := validateConfig(context.Background(), cfg)
+		upstream, err := validateConfig(context.Background(), appCfg, cfg)
 		if err != nil {
 			return err
 		}
@@ -89,7 +105,7 @@ func runConfig(cmd cli.Command) error {
 			return fmt.Errorf("missing config or name. Use: mirror config show -c <config_file> or mirror config show -n <mirror_name>")
 		}
 		if cmd.ConfigPath == "" {
-			cfg, err := state.LoadMirrorConfig(config.DBPath(cmd.NameRef))
+			cfg, err := state.LoadMirrorConfig(appCfg.DBPath(cmd.NameRef))
 			if err != nil {
 				return err
 			}
@@ -107,7 +123,7 @@ func runConfig(cmd cli.Command) error {
 	}
 }
 
-func runConfigDrivenMirrorCommand(cmd cli.Command) error {
+func runConfigDrivenMirrorCommand(cmd cli.Command, appCfg appconfig.Config) error {
 	if cmd.ConfigPath == "" {
 		return fmt.Errorf("missing config file. Use: mirror %s -c <config_file>", cmd.Name)
 	}
@@ -120,14 +136,14 @@ func runConfigDrivenMirrorCommand(cmd cli.Command) error {
 		return err
 	}
 
-	service, err := mirror.NewService()
+	service, err := newMirrorService(appCfg)
 	if err != nil {
 		return err
 	}
 
 	switch cmd.Name {
 	case "create":
-		return runPublishUpdate("Create", service, cfg)
+		return runPublishUpdate("Create", service, appCfg, cfg)
 	case "fetch":
 		result, err := service.Fetch(context.Background(), cfg)
 		if err != nil {
@@ -136,18 +152,18 @@ func runConfigDrivenMirrorCommand(cmd cli.Command) error {
 		printFetchResult("Fetch", result)
 		return nil
 	case "update":
-		return runPublishUpdate("Update", service, cfg)
+		return runPublishUpdate("Update", service, appCfg, cfg)
 	default:
 		return notImplemented(cmd.Name)
 	}
 }
 
-func runPublishUpdate(action string, mirrorService *mirror.Service, cfg config.Mirror) error {
+func runPublishUpdate(action string, mirrorService *mirror.Service, appCfg appconfig.Config, cfg config.Mirror) error {
 	fetchResult, err := mirrorService.Fetch(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
-	snapshotService, err := snapshot.NewService()
+	snapshotService, err := snapshot.NewService(snapshot.WithDBDir(appCfg.DBDir()))
 	if err != nil {
 		return err
 	}
@@ -155,7 +171,7 @@ func runPublishUpdate(action string, mirrorService *mirror.Service, cfg config.M
 	if err != nil {
 		return err
 	}
-	publishService, err := publish.NewService()
+	publishService, err := publish.NewService(publish.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir(), appCfg.MirrorsRoot))
 	if err != nil {
 		return err
 	}
@@ -175,6 +191,14 @@ func runPublishUpdate(action string, mirrorService *mirror.Service, cfg config.M
 }
 
 func runMirrorCommand(cmd cli.Command) error {
+	appCfg, err := loadAppConfig()
+	if err != nil {
+		return err
+	}
+	return runMirrorCommandWithConfig(cmd, appCfg)
+}
+
+func runMirrorCommandWithConfig(cmd cli.Command, appCfg appconfig.Config) error {
 	if err := validateMirrorIdentity(cmd); err != nil {
 		return err
 	}
@@ -182,17 +206,17 @@ func runMirrorCommand(cmd cli.Command) error {
 	if err != nil {
 		return err
 	}
-	service, err := mirror.NewService()
+	service, err := newMirrorService(appCfg)
 	if err != nil {
 		return err
 	}
 	switch cmd.Name {
 	case "daily", "weekly", "monthly":
-		cfg, err := configForMirrorCommand(cmd, name)
+		cfg, err := configForMirrorCommand(cmd, appCfg, name)
 		if err != nil {
 			return err
 		}
-		shouldRun, message, err := periodicShouldRun(name, cmd.Name)
+		shouldRun, message, err := periodicShouldRunWithConfig(name, cmd.Name, appCfg)
 		if err != nil {
 			return err
 		}
@@ -200,9 +224,9 @@ func runMirrorCommand(cmd cli.Command) error {
 			fmt.Println(message)
 			return nil
 		}
-		return runPublishUpdate(title(cmd.Name), service, cfg)
+		return runPublishUpdate(title(cmd.Name), service, appCfg, cfg)
 	case "rollback":
-		snapshotService, err := snapshot.NewService()
+		snapshotService, err := snapshot.NewService(snapshot.WithDBDir(appCfg.DBDir()))
 		if err != nil {
 			return err
 		}
@@ -211,11 +235,11 @@ func runMirrorCommand(cmd cli.Command) error {
 			return err
 		}
 		printRollbackResult(result)
-		cfg, err := configForMirrorCommand(cmd, name)
+		cfg, err := configForMirrorCommand(cmd, appCfg, name)
 		if err != nil {
 			return err
 		}
-		publishService, err := publish.NewService()
+		publishService, err := publish.NewService(publish.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir(), appCfg.MirrorsRoot))
 		if err != nil {
 			return err
 		}
@@ -231,18 +255,18 @@ func runMirrorCommand(cmd cli.Command) error {
 		printSigningResult(signResult)
 		return nil
 	case "info":
-		return runInfo(cmd, service, name)
+		return runInfo(cmd, service, appCfg, name)
 	case "more-info":
-		return runMoreInfo(name, service)
+		return runMoreInfoWithConfig(name, service, appCfg)
 	case "destroy":
-		result, err := runDestroy(name)
+		result, err := runDestroyWithConfig(name, appCfg)
 		if err != nil {
 			return err
 		}
 		printDestroyResult(result)
 		return nil
 	case "hide":
-		publishService, err := publish.NewService()
+		publishService, err := publish.NewService(publish.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir(), appCfg.MirrorsRoot))
 		if err != nil {
 			return err
 		}
@@ -253,7 +277,7 @@ func runMirrorCommand(cmd cli.Command) error {
 		printPublishResult(result)
 		return nil
 	case "cleanup":
-		result, err := runCleanup(name, cmd)
+		result, err := runCleanupWithConfig(name, cmd, appCfg)
 		if err != nil {
 			return err
 		}
@@ -264,10 +288,18 @@ func runMirrorCommand(cmd cli.Command) error {
 }
 
 func runList(cmd cli.Command) error {
+	appCfg, err := loadAppConfig()
+	if err != nil {
+		return err
+	}
+	return runListWithConfig(cmd, appCfg)
+}
+
+func runListWithConfig(cmd cli.Command, appCfg appconfig.Config) error {
 	if cmd.Subcommand != "" {
 		return fmt.Errorf("list does not accept subcommands")
 	}
-	service, err := mirror.NewService()
+	service, err := newMirrorService(appCfg)
 	if err != nil {
 		return err
 	}
@@ -300,6 +332,13 @@ type implementationTarget struct {
 }
 
 var implementationTargets = map[string]implementationTarget{}
+
+func newMirrorService(appCfg appconfig.Config) (*mirror.Service, error) {
+	return mirror.NewService(
+		mirror.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir()),
+		mirror.WithDownloader(appCfg.NewDownloader()),
+	)
+}
 
 func title(value string) string {
 	if value == "" {
@@ -354,7 +393,7 @@ func validateMirrorIdentity(cmd cli.Command) error {
 	return nil
 }
 
-func configForMirrorCommand(cmd cli.Command, name string) (config.Mirror, error) {
+func configForMirrorCommand(cmd cli.Command, appCfg appconfig.Config, name string) (config.Mirror, error) {
 	if cmd.ConfigPath != "" {
 		cfg, err := config.Load(cmd.ConfigPath)
 		if err != nil {
@@ -365,21 +404,29 @@ func configForMirrorCommand(cmd cli.Command, name string) (config.Mirror, error)
 		}
 		return cfg, nil
 	}
-	return state.LoadMirrorConfig(config.DBPath(name))
+	return state.LoadMirrorConfig(appCfg.DBPath(name))
 }
 
-func validateConfigWorkflow(ctx context.Context, cfg config.Mirror) ([]config.UpstreamRelease, error) {
+func validateConfigWorkflow(ctx context.Context, appCfg appconfig.Config, cfg config.Mirror) ([]config.UpstreamRelease, error) {
 	if err := config.Validate(cfg); err != nil {
 		return nil, err
 	}
-	if err := validateExistingMirrorConfig(cfg); err != nil {
+	if err := validateExistingMirrorConfigWithConfig(cfg, appCfg); err != nil {
 		return nil, err
 	}
-	return config.ValidateUpstreamDetails(ctx, cfg, download.NewClient())
+	return config.ValidateUpstreamDetails(ctx, cfg, appCfg.NewDownloader())
 }
 
 func validateExistingMirrorConfig(cfg config.Mirror) error {
-	dbPath := config.DBPath(cfg.Name)
+	appCfg, err := loadAppConfig()
+	if err != nil {
+		return err
+	}
+	return validateExistingMirrorConfigWithConfig(cfg, appCfg)
+}
+
+func validateExistingMirrorConfigWithConfig(cfg config.Mirror, appCfg appconfig.Config) error {
+	dbPath := appCfg.DBPath(cfg.Name)
 	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -437,6 +484,14 @@ func stringSlicesEqual(left, right []string) bool {
 }
 
 func periodicShouldRun(name, command string) (bool, string, error) {
+	appCfg, err := loadAppConfig()
+	if err != nil {
+		return false, "", err
+	}
+	return periodicShouldRunWithConfig(name, command, appCfg)
+}
+
+func periodicShouldRunWithConfig(name, command string, appCfg appconfig.Config) (bool, string, error) {
 	thresholds := map[string]int{
 		"daily":   1,
 		"weekly":  7,
@@ -446,7 +501,7 @@ func periodicShouldRun(name, command string) (bool, string, error) {
 	if !ok {
 		return true, "", nil
 	}
-	store, err := state.Open(config.DBPath(name))
+	store, err := state.Open(appCfg.DBPath(name))
 	if err != nil {
 		return false, "", err
 	}
@@ -476,7 +531,7 @@ func periodicShouldRun(name, command string) (bool, string, error) {
 	return true, "", nil
 }
 
-func runInfo(cmd cli.Command, service *mirror.Service, name string) error {
+func runInfo(cmd cli.Command, service *mirror.Service, appCfg appconfig.Config, name string) error {
 	if cmd.URL != "" {
 		matches, err := summariesByURL(service, cmd.URL)
 		if err != nil {
@@ -491,7 +546,7 @@ func runInfo(cmd cli.Command, service *mirror.Service, name string) error {
 			}
 			printSummary(summary)
 			if cmd.Snapshot != "" {
-				snapshotService, err := snapshot.NewService()
+				snapshotService, err := snapshot.NewService(snapshot.WithDBDir(appCfg.DBDir()))
 				if err != nil {
 					return err
 				}
@@ -509,7 +564,7 @@ func runInfo(cmd cli.Command, service *mirror.Service, name string) error {
 		return err
 	}
 	printSummary(summary)
-	snapshotService, err := snapshot.NewService()
+	snapshotService, err := snapshot.NewService(snapshot.WithDBDir(appCfg.DBDir()))
 	if err != nil {
 		return err
 	}
@@ -558,11 +613,15 @@ type destroyResult struct {
 }
 
 func runDestroy(name string) (destroyResult, error) {
-	home, err := os.UserHomeDir()
+	appCfg, err := loadAppConfig()
 	if err != nil {
 		return destroyResult{}, err
 	}
-	dbPath := config.DBPathForHome(home, name)
+	return runDestroyWithConfig(name, appCfg)
+}
+
+func runDestroyWithConfig(name string, appCfg appconfig.Config) (destroyResult, error) {
+	dbPath := appCfg.DBPath(name)
 	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
 			return destroyResult{}, fmt.Errorf("mirror %q does not exist", name)
@@ -586,18 +645,18 @@ func runDestroy(name string) (destroyResult, error) {
 	_ = store.Close()
 
 	result := destroyResult{MirrorName: name, DBPath: dbPath}
-	publishedPath, err := destroyPublishPath(home, cfg.Path)
+	publishedPath, err := destroyPublishPath(appCfg.MirrorsRoot, cfg.Path)
 	if err != nil {
 		return destroyResult{}, err
 	}
 	result.PublishedPath = publishedPath
 
-	packagePool, err := pool.New(config.PackageDirForHome(home))
+	packagePool, err := pool.New(appCfg.PackageDir())
 	if err != nil {
 		return destroyResult{}, err
 	}
 	for _, poolPath := range uniquePoolPaths(packages) {
-		shared, err := packageReferencedByOtherMirror(home, cfg.Name, poolPath)
+		shared, err := packageReferencedByOtherMirror(appCfg.DBDir(), cfg.Name, poolPath)
 		if err != nil {
 			return destroyResult{}, err
 		}
@@ -615,7 +674,7 @@ func runDestroy(name string) (destroyResult, error) {
 		result.PackageFiles++
 		result.PackageBytes += size
 	}
-	service, err := mirror.NewService()
+	service, err := newMirrorService(appCfg)
 	if err != nil {
 		return destroyResult{}, err
 	}
@@ -657,8 +716,8 @@ func uniquePoolPaths(packages []state.PackageRecord) []string {
 	return paths
 }
 
-func packageReferencedByOtherMirror(home, mirrorName, poolPath string) (bool, error) {
-	entries, err := os.ReadDir(config.DBDirForHome(home))
+func packageReferencedByOtherMirror(dbDir, mirrorName, poolPath string) (bool, error) {
+	entries, err := os.ReadDir(dbDir)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
@@ -673,7 +732,7 @@ func packageReferencedByOtherMirror(home, mirrorName, poolPath string) (bool, er
 		if name == mirrorName {
 			continue
 		}
-		store, err := state.Open(config.DBPathForHome(home, name))
+		store, err := state.Open(filepath.Join(dbDir, name+".sqlite"))
 		if err != nil {
 			return false, err
 		}
@@ -692,7 +751,15 @@ func packageReferencedByOtherMirror(home, mirrorName, poolPath string) (bool, er
 }
 
 func runMoreInfo(name string, service *mirror.Service) error {
-	store, err := state.Open(config.DBPath(name))
+	appCfg, err := loadAppConfig()
+	if err != nil {
+		return err
+	}
+	return runMoreInfoWithConfig(name, service, appCfg)
+}
+
+func runMoreInfoWithConfig(name string, service *mirror.Service, appCfg appconfig.Config) error {
+	store, err := state.Open(appCfg.DBPath(name))
 	if err != nil {
 		return err
 	}
@@ -739,11 +806,15 @@ type cleanupSnapshot struct {
 }
 
 func runCleanup(name string, cmd cli.Command) (cleanupResult, error) {
-	home, err := os.UserHomeDir()
+	appCfg, err := loadAppConfig()
 	if err != nil {
 		return cleanupResult{}, err
 	}
-	dbPath := config.DBPathForHome(home, name)
+	return runCleanupWithConfig(name, cmd, appCfg)
+}
+
+func runCleanupWithConfig(name string, cmd cli.Command, appCfg appconfig.Config) (cleanupResult, error) {
+	dbPath := appCfg.DBPath(name)
 	store, err := state.Open(dbPath)
 	if err != nil {
 		return cleanupResult{}, err
@@ -813,7 +884,7 @@ func runCleanup(name string, cmd cli.Command) (cleanupResult, error) {
 	}
 	result.PackageCandidates = paths
 	if result.Remove && len(paths) > 0 {
-		packagePool, err := pool.New(config.PackageDirForHome(home))
+		packagePool, err := pool.New(appCfg.PackageDir())
 		if err != nil {
 			return cleanupResult{}, err
 		}
