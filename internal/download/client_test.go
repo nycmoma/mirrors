@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"mirrors/internal/logging"
 )
 
 func TestFetchMetadataAndDownloadPackage(t *testing.T) {
@@ -96,6 +98,39 @@ func TestRetryThenSuccess(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestRetryLogsDiagnosticEvent(t *testing.T) {
+	var attempts int
+	server := newLocalServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 2 {
+			http.Error(w, "temporary", http.StatusInternalServerError)
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer server.Close()
+
+	logPath := filepath.Join(t.TempDir(), "mirrors.log")
+	logger, err := logging.OpenFile(logPath, logging.Debug)
+	if err != nil {
+		t.Fatalf("OpenFile returned error: %v", err)
+	}
+	client := NewClient(WithHTTPClient(server.Client()), WithRetries(2), WithRetryDelay(0), WithLogger(logger))
+	if _, err := client.FetchMetadata(context.Background(), server.URL+"/metadata", nil); err != nil {
+		t.Fatalf("FetchMetadata returned error: %v", err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	if !strings.Contains(string(data), "download retry attempt=1") {
+		t.Fatalf("retry log missing:\\n%s", string(data))
 	}
 }
 

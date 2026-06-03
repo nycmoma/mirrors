@@ -36,9 +36,11 @@ func (s *Service) Fetch(ctx context.Context, cfg config.Mirror) (FetchResult, er
 	if err := config.Validate(cfg); err != nil {
 		return FetchResult{}, err
 	}
+	s.logger.Infof("fetch start mirror=%q url=%q", cfg.Name, cfg.URL)
 
 	store, err := state.Open(s.dbPath(cfg.Name))
 	if err != nil {
+		s.logger.Errorf("fetch open state failed mirror=%q error=%v", cfg.Name, err)
 		return FetchResult{}, err
 	}
 	defer func() {
@@ -70,9 +72,11 @@ func (s *Service) Fetch(ctx context.Context, cfg config.Mirror) (FetchResult, er
 	plan, err := s.buildFetchPlan(ctx, cfg, packagePool)
 	if err != nil {
 		_ = recordFetchFailure(store, startedAt, err)
+		s.logger.Errorf("fetch plan failed mirror=%q error=%v", cfg.Name, err)
 		return FetchResult{}, err
 	}
 	result.Plan = plan.summary
+	s.logger.Infof("download plan mirror=%q indexes=%d reused=%d download=%d estimated_bytes=%d unknown_size=%d available_bytes=%d", plan.summary.MirrorName, plan.summary.IndexesConsidered, plan.summary.PackagesReused, plan.summary.PackagesToDownload, plan.summary.EstimatedDownloadBytes, plan.summary.UnknownSizePackages, plan.summary.AvailableBytes)
 	if s.downloadPlanReporter != nil {
 		s.downloadPlanReporter(plan.summary)
 	}
@@ -80,6 +84,7 @@ func (s *Service) Fetch(ctx context.Context, cfg config.Mirror) (FetchResult, er
 	downloadedPackages, err := s.downloadMissingPackages(ctx, cfg.URL, packagePool, plan)
 	if err != nil {
 		_ = recordFetchFailure(store, startedAt, err)
+		s.logger.Errorf("fetch package downloads failed mirror=%q error=%v", cfg.Name, err)
 		return FetchResult{}, err
 	}
 	seenDownloadedPackages := map[string]bool{}
@@ -133,6 +138,7 @@ func (s *Service) Fetch(ctx context.Context, cfg config.Mirror) (FetchResult, er
 	result.PackageCount = len(packageKeys)
 	result.AddedPackageCount, result.RemovedPackageCount = packageSetDiff(oldKeys, packageKeys)
 	result.Unchanged = result.AddedPackageCount == 0 && result.RemovedPackageCount == 0
+	s.logger.Infof("fetch complete mirror=%q indexes=%d packages=%d downloaded=%d reused=%d added=%d removed=%d", result.MirrorName, result.IndexCount, result.PackageCount, result.DownloadedCount, result.ReusedCount, result.AddedPackageCount, result.RemovedPackageCount)
 	return result, nil
 }
 
@@ -270,6 +276,7 @@ func (s *Service) fetchRelease(ctx context.Context, baseURL, suite string) (*deb
 	if err != nil {
 		return nil, err
 	}
+	s.logger.Debugf("fetch upstream metadata url=%q", inReleaseURL)
 	data, err := s.downloader.FetchMetadata(ctx, inReleaseURL, nil)
 	if err == nil {
 		release, _, err := debmeta.ParseInRelease(bytes.NewReader(data))
@@ -286,6 +293,7 @@ func (s *Service) fetchRelease(ctx context.Context, baseURL, suite string) (*deb
 	if err != nil {
 		return nil, err
 	}
+	s.logger.Debugf("fetch upstream metadata url=%q", releaseURL)
 	data, err = s.downloader.FetchMetadata(ctx, releaseURL, nil)
 	if err != nil {
 		return nil, err
@@ -308,6 +316,7 @@ func (s *Service) fetchPackageIndex(ctx context.Context, baseURL, suite, compone
 		if err != nil {
 			return nil, state.UpstreamIndexRecord{}, err
 		}
+		s.logger.Debugf("fetch upstream package index url=%q", indexURL)
 		data, err := s.downloader.FetchMetadata(ctx, indexURL, expected)
 		if err != nil {
 			return nil, state.UpstreamIndexRecord{}, err

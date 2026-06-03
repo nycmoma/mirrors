@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"mirrors/internal/config"
+	"mirrors/internal/logging"
 )
 
 const setupInstructions = "configure signing with [mirror] gpg_key, gpg_home, gpg_passphrase, gpg_passphrase_file, environment variables GPG_KEY/GPG_PASSPHRASE, or create a usable default gpg key"
@@ -38,6 +39,7 @@ type Runner interface {
 type Service struct {
 	runner Runner
 	getenv func(string) string
+	logger logging.Logger
 }
 
 // Option configures a Service.
@@ -57,14 +59,25 @@ func WithGetenv(getenv func(string) string) Option {
 	}
 }
 
+// WithLogger sets the diagnostic logger used by signing.
+func WithLogger(logger logging.Logger) Option {
+	return func(service *Service) {
+		service.logger = logger
+	}
+}
+
 // NewService creates a signing service.
 func NewService(options ...Option) *Service {
 	service := &Service{
 		runner: commandRunner{},
 		getenv: os.Getenv,
+		logger: logging.Nop(),
 	}
 	for _, option := range options {
 		option(service)
+	}
+	if service.logger == nil {
+		service.logger = logging.Nop()
 	}
 	return service
 }
@@ -75,9 +88,11 @@ func (s *Service) Sign(ctx context.Context, cfg config.Mirror, repo Repository) 
 	if err != nil {
 		return Result{}, err
 	}
+	s.logger.Debugf("signing setup enabled=%t gpg_home_set=%t gpg_key_set=%t passphrase_set=%t", resolved.Enabled, resolved.GPGHome != "", resolved.GPGKey != "", resolved.Passphrase != "")
 	inRelease := filepath.Join(repo.Path, "dists", repo.Suite, "InRelease")
 	releaseGPG := filepath.Join(repo.Path, "dists", repo.Suite, "Release.gpg")
 	if !resolved.Enabled {
+		s.logger.Infof("signing disabled suite=%q path=%q", repo.Suite, repo.Path)
 		if err := removeIfExists(inRelease); err != nil {
 			return Result{}, err
 		}
@@ -101,6 +116,7 @@ func (s *Service) Sign(ctx context.Context, cfg config.Mirror, repo Repository) 
 		return Result{}, wrapSigningError(fmt.Errorf("gpg executable not found: %w", err))
 	}
 
+	s.logger.Infof("signing start suite=%q path=%q", repo.Suite, repo.Path)
 	if err := s.runGPG(ctx, resolved, []string{
 		"--clearsign",
 		"--digest-algo", "SHA256",
@@ -119,6 +135,7 @@ func (s *Service) Sign(ctx context.Context, cfg config.Mirror, repo Repository) 
 		return Result{}, wrapSigningError(fmt.Errorf("create Release.gpg: %w", err))
 	}
 
+	s.logger.Infof("signing complete suite=%q in_release=%q release_gpg=%q", repo.Suite, inRelease, releaseGPG)
 	return Result{Enabled: true, InRelease: inRelease, ReleaseGPG: releaseGPG}, nil
 }
 
@@ -135,7 +152,19 @@ func (s *Service) runGPG(ctx context.Context, resolved resolvedConfig, args []st
 		base = append(base, "--pinentry-mode", "loopback", "--passphrase-fd", "0")
 		stdin = []byte(resolved.Passphrase)
 	}
-	return s.runner.Run(ctx, "gpg", append(base, args...), stdin)
+	fullArgs := append(base, args...)
+	s.logger.Debugf("run signing command command=%q args=%q stdin_set=%t", "gpg", redactedArgs(fullArgs), stdin != nil)
+	return s.runner.Run(ctx, "gpg", fullArgs, stdin)
+}
+
+func redactedArgs(args []string) string {
+	copied := append([]string(nil), args...)
+	for i := 0; i < len(copied); i++ {
+		if copied[i] == "--passphrase-fd" && i+1 < len(copied) {
+			copied[i+1] = "<redacted>"
+		}
+	}
+	return strings.Join(copied, " ")
 }
 
 type resolvedConfig struct {

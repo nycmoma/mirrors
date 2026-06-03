@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"mirrors/internal/config"
+	"mirrors/internal/logging"
 )
 
 func TestSignDisabledRemovesStaleSignatures(t *testing.T) {
@@ -108,6 +109,41 @@ func TestSignUsesEnvironmentWhenConfigMissing(t *testing.T) {
 	}
 	if string(runner.calls[0].stdin) != "env-pass" {
 		t.Fatalf("expected env passphrase, got %q", runner.calls[0].stdin)
+	}
+}
+
+func TestSigningLogsDoNotExposePassphrases(t *testing.T) {
+	root := writeRepo(t)
+	logPath := filepath.Join(t.TempDir(), "mirrors.log")
+	logger, err := logging.OpenFile(logPath, logging.Debug)
+	if err != nil {
+		t.Fatalf("OpenFile returned error: %v", err)
+	}
+	runner := &fakeRunner{}
+	service := NewService(WithRunner(runner), WithLogger(logger))
+
+	_, err = service.Sign(context.Background(), config.Mirror{
+		Signing: config.Signing{
+			GPGKey:        "config-key",
+			GPGPassphrase: "super-secret-passphrase",
+		},
+	}, Repository{Path: root, Suite: "focal"})
+	if err != nil {
+		t.Fatalf("Sign returned error: %v", err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "super-secret-passphrase") {
+		t.Fatalf("log exposed passphrase:\\n%s", text)
+	}
+	if !strings.Contains(text, "passphrase_set=true") || !strings.Contains(text, "stdin_set=true") {
+		t.Fatalf("log missing redacted signing diagnostics:\\n%s", text)
 	}
 }
 

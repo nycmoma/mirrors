@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"mirrors/internal/download"
+	"mirrors/internal/logging"
 )
 
 const (
@@ -19,6 +20,7 @@ const (
 	defaultHTTPRetries     = 3
 	defaultHTTPRetryDelay  = time.Second
 	defaultDownloadThreads = 4
+	defaultLogLevel        = "info"
 )
 
 // Config contains application-wide defaults from ~/.config/mirrors.conf.
@@ -30,6 +32,8 @@ type Config struct {
 	HTTPRetries     int
 	HTTPRetryDelay  time.Duration
 	DownloadThreads int
+	LogLevel        string
+	LogFile         string
 	Path            string
 }
 
@@ -82,16 +86,32 @@ func Default() Config {
 		HTTPRetries:     defaultHTTPRetries,
 		HTTPRetryDelay:  defaultHTTPRetryDelay,
 		DownloadThreads: defaultDownloadThreads,
+		LogLevel:        defaultLogLevel,
 	}
 }
 
 // NewDownloader returns a downloader client configured with global HTTP defaults.
 func (cfg Config) NewDownloader() download.Downloader {
+	return cfg.NewDownloaderWithLogger(logging.Nop())
+}
+
+// NewDownloaderWithLogger returns a downloader client with diagnostic logging.
+func (cfg Config) NewDownloaderWithLogger(logger logging.Logger) download.Downloader {
 	return download.NewClient(
 		download.WithTimeout(cfg.HTTPTimeout),
 		download.WithRetries(cfg.HTTPRetries),
 		download.WithRetryDelay(cfg.HTTPRetryDelay),
+		download.WithLogger(logger),
 	)
+}
+
+// NewLogger returns the configured diagnostic logger.
+func (cfg Config) NewLogger() (logging.Logger, error) {
+	level, err := logging.ParseLevel(cfg.LogLevel)
+	if err != nil {
+		return nil, err
+	}
+	return logging.OpenFile(cfg.LogFile, level)
 }
 
 // DBDir returns the directory containing per-mirror SQLite DB files.
@@ -183,6 +203,9 @@ func applyValues(cfg *Config, values map[string]string) error {
 	if value := strings.TrimSpace(values["logs_root"]); value != "" {
 		cfg.LogsRoot = expandHome(value)
 	}
+	if value := strings.TrimSpace(values["log_level"]); value != "" {
+		cfg.LogLevel = strings.ToLower(value)
+	}
 	if strings.TrimSpace(cfg.DataRoot) == "" {
 		return fmt.Errorf("data_root is required")
 	}
@@ -204,6 +227,18 @@ func applyValues(cfg *Config, values map[string]string) error {
 	}
 	if err := applyInt(values, "download_threads", &cfg.DownloadThreads); err != nil {
 		return err
+	}
+	if _, err := logging.ParseLevel(cfg.LogLevel); err != nil {
+		return err
+	}
+	if value := strings.TrimSpace(values["log_file"]); value != "" {
+		logFile := expandHome(value)
+		if !filepath.IsAbs(logFile) {
+			logFile = filepath.Join(cfg.LogsRoot, filepath.Clean(logFile))
+		}
+		cfg.LogFile = logFile
+	} else {
+		cfg.LogFile = ""
 	}
 	if cfg.HTTPTimeout <= 0 {
 		return fmt.Errorf("http_timeout must be positive")
@@ -232,6 +267,8 @@ http_timeout = %s
 http_retries = %d
 http_retry_delay = %s
 download_threads = %d
+log_level = %s
+log_file =
 `,
 		cfg.DataRoot,
 		cfg.MirrorsRoot,
@@ -240,6 +277,7 @@ download_threads = %d
 		cfg.HTTPRetries,
 		cfg.HTTPRetryDelay,
 		cfg.DownloadThreads,
+		cfg.LogLevel,
 	)
 	return os.WriteFile(path, []byte(content), 0644)
 }

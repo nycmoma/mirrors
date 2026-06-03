@@ -75,6 +75,7 @@ func (s *Service) downloadMissingPackages(ctx context.Context, baseURL string, p
 					Filename: item.pkg.Filename,
 					Size:     item.pkg.Size,
 				})
+				s.logger.Debugf("package download start filename=%q size=%d", item.pkg.Filename, item.pkg.Size)
 				result, err := s.downloadOnePackage(ctx, baseURL, packagePool, item, func(currentBytes int64) {
 					reporter.Bytes(DownloadProgressBytes{
 						Filename:     item.pkg.Filename,
@@ -83,9 +84,11 @@ func (s *Service) downloadMissingPackages(ctx context.Context, baseURL string, p
 					})
 				})
 				if err != nil {
+					s.logger.Errorf("package download failed filename=%q error=%v", item.pkg.Filename, err)
 					fail(item, err)
 					return
 				}
+				s.logger.Debugf("package download complete filename=%q pool_path=%q", item.pkg.Filename, result.poolPath)
 				reporter.PackageComplete(DownloadProgressPackageComplete{
 					Filename: item.pkg.Filename,
 					Size:     item.pkg.Size,

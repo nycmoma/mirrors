@@ -16,6 +16,7 @@ import (
 
 	"mirrors/internal/config"
 	"mirrors/internal/download"
+	"mirrors/internal/logging"
 )
 
 func TestPackagesIndexURL(t *testing.T) {
@@ -146,6 +147,35 @@ func TestFetchDownloadsPlannedPackagesWithProgress(t *testing.T) {
 	}
 	if progress.bytes != int64(len("deb-v1")+len("deb-v2")+len("deb-v3")) {
 		t.Fatalf("unexpected progress bytes: %d", progress.bytes)
+	}
+}
+
+func TestFetchWritesDownloadPlanDiagnostics(t *testing.T) {
+	home := t.TempDir()
+	repo := newRepoFixture("http://repo.test/ubuntu", "1.0", "deb-v1")
+	downloader := newFakeDownloader(repo.files)
+	logPath := filepath.Join(t.TempDir(), "mirrors.log")
+	logger, err := logging.OpenFile(logPath, logging.Debug)
+	if err != nil {
+		t.Fatalf("OpenFile returned error: %v", err)
+	}
+	service := newTestService(t, home, downloader, WithLogger(logger), WithDiskSpaceChecker(&fakeDiskSpaceChecker{available: 1024}))
+
+	if _, err := service.Fetch(context.Background(), repo.config); err != nil {
+		t.Fatalf("Fetch returned error: %v", err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{"fetch upstream metadata url=", "fetch upstream package index url=", "download plan mirror=\"ubuntu\"", "fetch complete mirror=\"ubuntu\""} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("log missing %q:\n%s", want, text)
+		}
 	}
 }
 

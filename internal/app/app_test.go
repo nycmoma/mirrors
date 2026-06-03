@@ -17,6 +17,7 @@ import (
 	"mirrors/internal/cli"
 	"mirrors/internal/config"
 	"mirrors/internal/download"
+	"mirrors/internal/logging"
 	"mirrors/internal/mirror"
 	"mirrors/internal/state"
 
@@ -58,6 +59,40 @@ func TestNotImplementedReportsPlannedPhase(t *testing.T) {
 	want := `action "future" will be implemented in Phase 11: App Workflows.`
 	if err.Error() != want {
 		t.Fatalf("expected %q, got %q", want, err.Error())
+	}
+}
+
+func TestRunWritesConfiguredLogFileWithoutChangingCommandOutput(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, ".config")
+	logFile := filepath.Join(home, "logs", "mirrors.log")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if err := os.MkdirAll(xdg, 0755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "mirrors.conf"), []byte("log_level = debug\nlog_file = "+logFile+"\n"), 0644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	output, err := captureStdout(func() error {
+		return Run([]string{"list"})
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !strings.Contains(output, "No mirrors found") {
+		t.Fatalf("unexpected stdout: %q", output)
+	}
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("expected configured log file: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{`command start name="list"`, `app config path=`, `command complete name="list"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("log missing %q:\n%s", want, text)
+		}
 	}
 }
 
@@ -113,7 +148,7 @@ func TestRunConfigGenerate(t *testing.T) {
 func TestRunConfigValidatePrintsUpstreamOriginAndLabel(t *testing.T) {
 	isolateAppConfig(t)
 	oldValidate := validateConfig
-	validateConfig = func(_ context.Context, _ appconfig.Config, cfg config.Mirror) ([]config.UpstreamRelease, error) {
+	validateConfig = func(_ context.Context, _ appconfig.Config, cfg config.Mirror, _ logging.Logger) ([]config.UpstreamRelease, error) {
 		if cfg.Name != "ubuntu" {
 			t.Fatalf("unexpected config: %#v", cfg)
 		}

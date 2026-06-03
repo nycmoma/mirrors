@@ -11,10 +11,10 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 14: Download Concurrency and Progress
+Phase 15: Logging
 ```
 
-Phase 15 logging work is next.
+Phase 16 mirror update policy work is next.
 
 Implemented packages and behavior:
 
@@ -30,6 +30,7 @@ Implemented packages and behavior:
 - Download support in `internal/download`:
   - configurable HTTP timeout
   - retry handling
+  - retry diagnostics when file logging is configured
   - metadata fetch
   - package/file download
   - package download byte-progress callbacks
@@ -91,9 +92,11 @@ Implemented packages and behavior:
   - passphrase support from config value, passphrase file, or environment
   - `InRelease` and `Release.gpg` generation from the current `Release`
   - stale signature removal before each signing attempt
+  - diagnostic logging without passphrase values
 - App workflow support in `internal/app` currently includes:
   - `config generate` starter config rendering from a Release/InRelease URL
   - global application config loading and validation
+  - optional file-backed diagnostic logging
   - download estimate output for package-consuming workflows
   - interactive package download progress bar with line-based log fallback
   - `daily`, `weekly`, and `monthly` update workflow aliases
@@ -122,6 +125,8 @@ http_timeout = 30s
 http_retries = 3
 http_retry_delay = 1s
 download_threads = 4
+log_level = info
+log_file =
 ```
 
 `data_root` stores SQLite DB files under `db/` and package files under
@@ -129,6 +134,11 @@ download_threads = 4
 The app creates missing root directories and requires `data_root`,
 `mirrors_root`, and `logs_root` to be directories and writable before startup
 continues.
+
+`log_file` is optional. When empty, no diagnostic log file is created. Absolute
+log paths are used directly. Relative log paths are resolved from `logs_root`,
+so `..` path segments can intentionally place logs relative to that root.
+`log_level` accepts `error`, `warn`, `info`, or `debug`.
 
 ## Available Actions
 

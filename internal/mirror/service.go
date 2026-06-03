@@ -10,6 +10,7 @@ import (
 
 	"mirrors/internal/config"
 	"mirrors/internal/download"
+	"mirrors/internal/logging"
 	"mirrors/internal/pool"
 	"mirrors/internal/state"
 )
@@ -24,6 +25,7 @@ type Service struct {
 	downloadPlanReporter func(DownloadPlan)
 	progressReporter     ProgressReporter
 	downloadThreads      int
+	logger               logging.Logger
 }
 
 // Option configures a Service.
@@ -81,6 +83,13 @@ func WithDownloadThreads(threads int) Option {
 	}
 }
 
+// WithLogger sets the diagnostic logger used by mirror workflows.
+func WithLogger(logger logging.Logger) Option {
+	return func(service *Service) {
+		service.logger = logger
+	}
+}
+
 // NewService creates a mirror service.
 func NewService(options ...Option) (*Service, error) {
 	home, err := os.UserHomeDir()
@@ -95,6 +104,7 @@ func NewService(options ...Option) (*Service, error) {
 		diskChecker:      statfsDiskSpaceChecker{},
 		progressReporter: noopProgressReporter{},
 		downloadThreads:  4,
+		logger:           logging.Nop(),
 	}
 	for _, option := range options {
 		option(service)
@@ -119,6 +129,9 @@ func NewService(options ...Option) (*Service, error) {
 	}
 	if service.downloadThreads < 1 {
 		service.downloadThreads = 1
+	}
+	if service.logger == nil {
+		service.logger = logging.Nop()
 	}
 	return service, nil
 }

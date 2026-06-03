@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"mirrors/internal/logging"
 )
 
 const (
@@ -18,6 +20,7 @@ type Client struct {
 	retries    int
 	retryDelay time.Duration
 	sleep      func(context.Context, time.Duration) error
+	logger     logging.Logger
 }
 
 // Downloader is the testable download interface used by later workflow phases.
@@ -37,6 +40,7 @@ func NewClient(options ...Option) *Client {
 		retries:    defaultRetries,
 		retryDelay: defaultRetryDelay,
 		sleep:      sleepContext,
+		logger:     logging.Nop(),
 	}
 
 	for _, option := range options {
@@ -47,6 +51,9 @@ func NewClient(options ...Option) *Client {
 	}
 	if client.sleep == nil {
 		client.sleep = sleepContext
+	}
+	if client.logger == nil {
+		client.logger = logging.Nop()
 	}
 	if client.retries < 0 {
 		client.retries = 0
@@ -93,6 +100,13 @@ func WithSleeper(sleeper func(context.Context, time.Duration) error) Option {
 	}
 }
 
+// WithLogger sets a diagnostic logger for retry events.
+func WithLogger(logger logging.Logger) Option {
+	return func(client *Client) {
+		client.logger = logger
+	}
+}
+
 func (client *Client) doWithRetry(ctx context.Context, operation func() error) error {
 	var err error
 	attempts := client.retries + 1
@@ -106,6 +120,7 @@ func (client *Client) doWithRetry(ctx context.Context, operation func() error) e
 		if attempt == attempts-1 || !retryable(err) {
 			return err
 		}
+		client.logger.Debugf("download retry attempt=%d next_attempt=%d max_attempts=%d delay=%s error=%v", attempt+1, attempt+2, attempts, delay, err)
 		if sleepErr := client.sleep(ctx, delay); sleepErr != nil {
 			return sleepErr
 		}

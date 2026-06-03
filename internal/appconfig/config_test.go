@@ -38,6 +38,12 @@ func TestLoadUsesDefaultsWhenConfigIsMissing(t *testing.T) {
 	if cfg.DownloadThreads != 4 {
 		t.Fatalf("unexpected download threads: %d", cfg.DownloadThreads)
 	}
+	if cfg.LogLevel != "info" {
+		t.Fatalf("unexpected log level: %q", cfg.LogLevel)
+	}
+	if cfg.LogFile != "" {
+		t.Fatalf("default log file should be empty: %q", cfg.LogFile)
+	}
 	if _, err := os.Stat(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "mirrors.conf")); err != nil {
 		t.Fatalf("expected default config to be created: %v", err)
 	}
@@ -123,6 +129,8 @@ http_timeout = 45s
 http_retries = 5
 http_retry_delay = 250ms
 download_threads = 4
+log_level = debug
+log_file = mirror.log
 `)
 
 	cfg, err := Load()
@@ -155,6 +163,47 @@ download_threads = 4
 	}
 	if cfg.DownloadThreads != 4 {
 		t.Fatalf("unexpected download threads: %d", cfg.DownloadThreads)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Fatalf("unexpected log level: %q", cfg.LogLevel)
+	}
+	if cfg.LogFile != filepath.Join(home, "mirror-logs", "mirror.log") {
+		t.Fatalf("unexpected log file: %q", cfg.LogFile)
+	}
+}
+
+func TestLoadUsesAbsoluteLogFilePath(t *testing.T) {
+	home := t.TempDir()
+	xdg := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "mirrors.log")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	writeConfig(t, filepath.Join(xdg, "mirrors.conf"), "log_file = "+logFile)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.LogFile != logFile {
+		t.Fatalf("unexpected log file: %q", cfg.LogFile)
+	}
+}
+
+func TestNewLoggerDefaultIsQuiet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := Default()
+
+	logger, err := cfg.NewLogger()
+	if err != nil {
+		t.Fatalf("NewLogger returned error: %v", err)
+	}
+	logger.Infof("hidden")
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if entries, err := os.ReadDir(cfg.LogsRoot); err == nil && len(entries) > 0 {
+		t.Fatalf("default logger should not create files: %#v", entries)
 	}
 }
 
@@ -215,6 +264,7 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "retries", content: "http_retries = -1"},
 		{name: "retry delay", content: "http_retry_delay = -1s"},
 		{name: "threads", content: "download_threads = 0"},
+		{name: "log level", content: "log_level = verbose"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
