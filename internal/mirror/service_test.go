@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"mirrors/internal/config"
 	"mirrors/internal/download"
@@ -125,6 +127,145 @@ func TestFetchAllowsUnknownPackageSizeWithPlanWarning(t *testing.T) {
 	}
 }
 
+func TestFetchDownloadsPlannedPackagesWithProgress(t *testing.T) {
+	home := t.TempDir()
+	repo := newRepoFixtureWithPayloads("http://repo.test/ubuntu", []string{"deb-v1", "deb-v2", "deb-v3"})
+	downloader := newFakeDownloader(repo.files)
+	progress := &recordingProgressReporter{}
+	service := newTestService(t, home, downloader, WithDownloadThreads(2), WithProgressReporter(progress), WithDiskSpaceChecker(&fakeDiskSpaceChecker{available: 1024}))
+
+	result, err := service.Fetch(context.Background(), repo.config)
+	if err != nil {
+		t.Fatalf("Fetch returned error: %v", err)
+	}
+	if result.DownloadedCount != 3 || result.ReusedCount != 0 || result.Plan.PackagesToDownload != 3 {
+		t.Fatalf("unexpected fetch result: %#v", result)
+	}
+	if progress.starts != 1 || progress.completes != 3 || progress.errors != 0 || progress.finishes != 1 {
+		t.Fatalf("unexpected progress events: %#v", progress.snapshot())
+	}
+	if progress.bytes != int64(len("deb-v1")+len("deb-v2")+len("deb-v3")) {
+		t.Fatalf("unexpected progress bytes: %d", progress.bytes)
+	}
+}
+
+func TestFetchRespectsDownloadThreadLimit(t *testing.T) {
+	home := t.TempDir()
+	repo := newRepoFixtureWithPayloads("http://repo.test/ubuntu", []string{"deb-v1", "deb-v2", "deb-v3"})
+	downloader := newFakeDownloader(repo.files)
+	downloader.started = make(chan string, 3)
+	downloader.release = make(chan struct{})
+	service := newTestService(t, home, downloader, WithDownloadThreads(2), WithDiskSpaceChecker(&fakeDiskSpaceChecker{available: 1024}))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Fetch(context.Background(), repo.config)
+		done <- err
+	}()
+
+	waitDownloadStart(t, downloader.started)
+	waitDownloadStart(t, downloader.started)
+	select {
+	case started := <-downloader.started:
+		t.Fatalf("download %q started before thread slot was released", started)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(downloader.release)
+
+	if err := <-done; err != nil {
+		t.Fatalf("Fetch returned error: %v", err)
+	}
+	if downloader.maxActiveDownloads() > 2 {
+		t.Fatalf("expected at most 2 active downloads, got %d", downloader.maxActiveDownloads())
+	}
+}
+
+func TestFetchCancelsPendingDownloadsOnFailure(t *testing.T) {
+	home := t.TempDir()
+	repo := newRepoFixtureWithPayloads("http://repo.test/ubuntu", []string{"deb-v1", "deb-v2", "deb-v3"})
+	downloader := newFakeDownloader(repo.files)
+	downloader.failURLs = map[string]error{repo.packageURLs[0]: fmt.Errorf("boom")}
+	progress := &recordingProgressReporter{}
+	service := newTestService(t, home, downloader, WithDownloadThreads(1), WithProgressReporter(progress), WithDiskSpaceChecker(&fakeDiskSpaceChecker{available: 1024}))
+
+	_, err := service.Fetch(context.Background(), repo.config)
+	if err == nil {
+		t.Fatal("expected download failure")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if downloader.downloads[repo.packageURLs[1]] != 0 || downloader.downloads[repo.packageURLs[2]] != 0 {
+		t.Fatalf("pending downloads were not canceled: %#v", downloader.downloads)
+	}
+	if progress.errors != 1 || progress.finishes != 1 {
+		t.Fatalf("expected error and finish progress events, got %#v", progress.snapshot())
+	}
+}
+
+func TestFetchReportsEveryStartedFailure(t *testing.T) {
+	home := t.TempDir()
+	repo := newRepoFixtureWithPayloads("http://repo.test/ubuntu", []string{"deb-v1", "deb-v2", "deb-v3"})
+	downloader := newFakeDownloader(repo.files)
+	downloader.started = make(chan string, 3)
+	downloader.release = make(chan struct{})
+	downloader.failURLs = map[string]error{
+		repo.packageURLs[0]: fmt.Errorf("boom 1"),
+		repo.packageURLs[1]: fmt.Errorf("boom 2"),
+	}
+	progress := &recordingProgressReporter{}
+	service := newTestService(t, home, downloader, WithDownloadThreads(2), WithProgressReporter(progress), WithDiskSpaceChecker(&fakeDiskSpaceChecker{available: 1024}))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Fetch(context.Background(), repo.config)
+		done <- err
+	}()
+
+	waitDownloadStart(t, downloader.started)
+	waitDownloadStart(t, downloader.started)
+	close(downloader.release)
+
+	err := <-done
+	if err == nil {
+		t.Fatal("expected download failure")
+	}
+	snapshot := progress.snapshot()
+	if snapshot.packageStarts != 2 || snapshot.errors != 2 || snapshot.lastFinish.FailedPackages != 2 {
+		t.Fatalf("expected both started packages to fail in progress accounting, got %#v", snapshot)
+	}
+	if downloader.downloads[repo.packageURLs[2]] != 0 {
+		t.Fatalf("pending package should not start after failures: %#v", downloader.downloads)
+	}
+}
+
+func TestFetchDoesNotUpdatePackageStateOnDownloadFailure(t *testing.T) {
+	home := t.TempDir()
+	repo := newRepoFixture("http://repo.test/ubuntu", "1.0", "deb-v1")
+	downloader := newFakeDownloader(repo.files)
+	service := newTestService(t, home, downloader, WithDiskSpaceChecker(&fakeDiskSpaceChecker{available: 1024}))
+
+	if _, err := service.Fetch(context.Background(), repo.config); err != nil {
+		t.Fatalf("initial Fetch returned error: %v", err)
+	}
+
+	repoV2 := newRepoFixtureWithPayloads("http://repo.test/ubuntu", []string{"deb-v2", "deb-v3"})
+	downloader.files = repoV2.files
+	downloader.failURLs = map[string]error{repoV2.packageURLs[1]: fmt.Errorf("boom")}
+	_, err := service.Fetch(context.Background(), repoV2.config)
+	if err == nil {
+		t.Fatal("expected download failure")
+	}
+
+	summary, err := service.Info(repo.config.Name)
+	if err != nil {
+		t.Fatalf("Info returned error: %v", err)
+	}
+	if summary.Stats.MirrorPackageCount != 1 {
+		t.Fatalf("failed fetch should not replace mirror package membership: %#v", summary.Stats)
+	}
+}
+
 func TestFetchDetectsChangedPackageVersion(t *testing.T) {
 	home := t.TempDir()
 	repo := newRepoFixture("http://repo.test/ubuntu", "1.0", "deb-v1")
@@ -200,9 +341,10 @@ func newTestService(t *testing.T, home string, downloader download.Downloader, o
 }
 
 type repoFixture struct {
-	config     config.Mirror
-	files      map[string][]byte
-	packageURL string
+	config      config.Mirror
+	files       map[string][]byte
+	packageURL  string
+	packageURLs []string
 }
 
 func newRepoFixture(baseURL, version, packagePayload string) repoFixture {
@@ -214,13 +356,30 @@ func newRepoFixtureWithoutSize(baseURL, version, packagePayload string) repoFixt
 }
 
 func newRepoFixtureWithSize(baseURL, version, packagePayload string, includeSize bool) repoFixture {
-	checksums := checksumBytes([]byte(packagePayload))
-	filename := fmt.Sprintf("pool/main/d/demo/demo_%s_amd64.deb", version)
-	sizeLine := ""
-	if includeSize {
-		sizeLine = fmt.Sprintf("Size: %d\n", len(packagePayload))
+	return newRepoFixtureWithVersionsAndSize(baseURL, []string{version}, []string{packagePayload}, includeSize)
+}
+
+func newRepoFixtureWithPayloads(baseURL string, packagePayloads []string) repoFixture {
+	versions := make([]string, 0, len(packagePayloads))
+	for i := range packagePayloads {
+		versions = append(versions, fmt.Sprintf("%d.0", i+1))
 	}
-	packages := fmt.Sprintf(`Package: demo
+	return newRepoFixtureWithVersionsAndSize(baseURL, versions, packagePayloads, true)
+}
+
+func newRepoFixtureWithVersionsAndSize(baseURL string, versions []string, packagePayloads []string, includeSize bool) repoFixture {
+	var packages strings.Builder
+	files := map[string][]byte{}
+	var packageURLs []string
+	for i, packagePayload := range packagePayloads {
+		version := versions[i]
+		checksums := checksumBytes([]byte(packagePayload))
+		filename := fmt.Sprintf("pool/main/d/demo/demo_%s_amd64.deb", version)
+		sizeLine := ""
+		if includeSize {
+			sizeLine = fmt.Sprintf("Size: %d\n", len(packagePayload))
+		}
+		packages.WriteString(fmt.Sprintf(`Package: demo
 Version: %s
 Architecture: amd64
 Filename: %s
@@ -229,8 +388,14 @@ SHA1: %s
 SHA256: %s
 SHA512: %s
 
-`, version, filename, sizeLine, checksums.MD5, checksums.SHA1, checksums.SHA256, checksums.SHA512)
-	packagesChecksum := checksumBytes([]byte(packages))
+`, version, filename, sizeLine, checksums.MD5, checksums.SHA1, checksums.SHA256, checksums.SHA512))
+		packageURL, _ := PackageURL(baseURL, filename)
+		files[packageURL] = []byte(packagePayload)
+		packageURLs = append(packageURLs, packageURL)
+	}
+
+	packagesBytes := []byte(packages.String())
+	packagesChecksum := checksumBytes(packagesBytes)
 
 	release := fmt.Sprintf(`Origin: Test
 Label: Test
@@ -241,10 +406,11 @@ Components: main
 SHA256:
  %s %d main/binary-amd64/Packages
 
-`, packagesChecksum.SHA256, len(packages))
+`, packagesChecksum.SHA256, len(packagesBytes))
 
-	packageURL, _ := PackageURL(baseURL, filename)
-	return repoFixture{
+	files[baseURL+"/dists/focal/Release"] = []byte(release)
+	files[baseURL+"/dists/focal/main/binary-amd64/Packages"] = packagesBytes
+	fixture := repoFixture{
 		config: config.Mirror{
 			Name:       "ubuntu",
 			URL:        baseURL,
@@ -260,13 +426,11 @@ SHA256:
 				GPGPassphrase: "1234",
 			},
 		},
-		files: map[string][]byte{
-			baseURL + "/dists/focal/Release":                    []byte(release),
-			baseURL + "/dists/focal/main/binary-amd64/Packages": []byte(packages),
-			packageURL: []byte(packagePayload),
-		},
-		packageURL: packageURL,
+		files:       files,
+		packageURL:  packageURLs[0],
+		packageURLs: packageURLs,
 	}
+	return fixture
 }
 
 type fakeDiskSpaceChecker struct {
@@ -279,8 +443,14 @@ func (c *fakeDiskSpaceChecker) AvailableBytes(_ string) (int64, error) {
 }
 
 type fakeDownloader struct {
+	mu        sync.Mutex
 	files     map[string][]byte
 	downloads map[string]int
+	failURLs  map[string]error
+	started   chan string
+	release   chan struct{}
+	active    int
+	maxActive int
 }
 
 func newFakeDownloader(files map[string][]byte) *fakeDownloader {
@@ -298,16 +468,57 @@ func (d *fakeDownloader) FetchMetadata(_ context.Context, rawURL string, _ *down
 	return append([]byte(nil), data...), nil
 }
 
-func (d *fakeDownloader) DownloadPackage(_ context.Context, rawURL, destination string, _ *download.Checksum) error {
+func (d *fakeDownloader) DownloadPackage(ctx context.Context, rawURL, destination string, expected *download.Checksum) error {
+	return d.DownloadPackageWithProgress(ctx, rawURL, destination, expected, nil)
+}
+
+func (d *fakeDownloader) DownloadPackageWithProgress(ctx context.Context, rawURL, destination string, _ *download.Checksum, onBytes func(int64)) error {
 	data, ok := d.files[rawURL]
 	if !ok {
 		return &download.HTTPError{URL: rawURL, StatusCode: 404, Status: "404 Not Found"}
 	}
+	d.mu.Lock()
 	d.downloads[rawURL]++
+	d.active++
+	if d.active > d.maxActive {
+		d.maxActive = d.active
+	}
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		d.active--
+		d.mu.Unlock()
+	}()
+	if d.started != nil {
+		d.started <- rawURL
+	}
+	if d.release != nil {
+		select {
+		case <-d.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if err := d.failURLs[rawURL]; err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
 		return err
 	}
+	if onBytes != nil {
+		mid := len(data) / 2
+		if mid > 0 {
+			onBytes(int64(mid))
+		}
+		onBytes(int64(len(data)))
+	}
 	return os.WriteFile(destination, data, 0644)
+}
+
+func (d *fakeDownloader) maxActiveDownloads() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.maxActive
 }
 
 func (d *fakeDownloader) GetLength(_ context.Context, rawURL string) (int64, error) {
@@ -316,6 +527,98 @@ func (d *fakeDownloader) GetLength(_ context.Context, rawURL string) (int64, err
 		return -1, &download.HTTPError{URL: rawURL, StatusCode: 404, Status: "404 Not Found"}
 	}
 	return int64(len(data)), nil
+}
+
+func waitDownloadStart(t *testing.T, started <-chan string) string {
+	t.Helper()
+	select {
+	case rawURL := <-started:
+		return rawURL
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for download to start")
+		return ""
+	}
+}
+
+type recordingProgressReporter struct {
+	mu            sync.Mutex
+	starts        int
+	packageStarts int
+	completes     int
+	errors        int
+	finishes      int
+	bytes         int64
+	packageBytes  map[string]int64
+	lastFinish    DownloadProgressFinish
+}
+
+func (r *recordingProgressReporter) Start(DownloadProgressStart) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.starts++
+	r.packageBytes = map[string]int64{}
+}
+
+func (r *recordingProgressReporter) PackageStart(DownloadProgressPackageStart) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.packageStarts++
+}
+
+func (r *recordingProgressReporter) Bytes(event DownloadProgressBytes) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.packageBytes == nil {
+		r.packageBytes = map[string]int64{}
+	}
+	r.packageBytes[event.Filename] = event.CurrentBytes
+	r.bytes = 0
+	for _, current := range r.packageBytes {
+		r.bytes += current
+	}
+}
+
+func (r *recordingProgressReporter) PackageComplete(DownloadProgressPackageComplete) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.completes++
+}
+
+func (r *recordingProgressReporter) Error(DownloadProgressError) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errors++
+}
+
+func (r *recordingProgressReporter) Finish(event DownloadProgressFinish) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.finishes++
+	r.lastFinish = event
+}
+
+type progressSnapshot struct {
+	starts        int
+	packageStarts int
+	completes     int
+	errors        int
+	finishes      int
+	bytes         int64
+	lastFinish    DownloadProgressFinish
+}
+
+func (r *recordingProgressReporter) snapshot() progressSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return progressSnapshot{
+		starts:        r.starts,
+		packageStarts: r.packageStarts,
+		completes:     r.completes,
+		errors:        r.errors,
+		finishes:      r.finishes,
+		bytes:         r.bytes,
+		lastFinish:    r.lastFinish,
+	}
 }
 
 type testChecksums struct {

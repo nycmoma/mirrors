@@ -338,6 +338,8 @@ func newMirrorService(appCfg appconfig.Config) (*mirror.Service, error) {
 		mirror.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir()),
 		mirror.WithDownloader(appCfg.NewDownloader()),
 		mirror.WithDownloadPlanReporter(printDownloadPlan),
+		mirror.WithDownloadThreads(appCfg.DownloadThreads),
+		mirror.WithProgressReporter(newTerminalProgressReporter()),
 	)
 }
 

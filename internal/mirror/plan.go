@@ -50,6 +50,7 @@ type fetchPlan struct {
 	summary        DownloadPlan
 	releases       []plannedRelease
 	indexes        []plannedIndex
+	downloads      []plannedDownload
 	packagePool    *pool.Pool
 	seenDownloadID map[string]bool
 }
@@ -61,6 +62,11 @@ type plannedRelease struct {
 type plannedIndex struct {
 	record   state.UpstreamIndexRecord
 	packages []debmeta.Package
+}
+
+type plannedDownload struct {
+	identity string
+	pkg      debmeta.Package
 }
 
 func packageIdentity(pkg debmeta.Package) string {

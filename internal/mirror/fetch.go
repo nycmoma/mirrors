@@ -77,6 +77,13 @@ func (s *Service) Fetch(ctx context.Context, cfg config.Mirror) (FetchResult, er
 		s.downloadPlanReporter(plan.summary)
 	}
 
+	downloadedPackages, err := s.downloadMissingPackages(ctx, cfg.URL, packagePool, plan)
+	if err != nil {
+		_ = recordFetchFailure(store, startedAt, err)
+		return FetchResult{}, err
+	}
+	seenDownloadedPackages := map[string]bool{}
+
 	for _, release := range plan.releases {
 		if err := store.UpsertUpstreamRelease(release.record); err != nil {
 			_ = recordFetchFailure(store, startedAt, err)
@@ -92,7 +99,7 @@ func (s *Service) Fetch(ctx context.Context, cfg config.Mirror) (FetchResult, er
 		result.IndexCount++
 
 		for _, pkg := range index.packages {
-			key, reused, err := s.ensurePackage(ctx, cfg.URL, packagePool, store, pkg)
+			key, reused, err := s.recordPlannedPackage(packagePool, store, pkg, downloadedPackages, seenDownloadedPackages)
 			if err != nil {
 				_ = recordFetchFailure(store, startedAt, err)
 				return FetchResult{}, err
@@ -216,12 +223,46 @@ func (plan *fetchPlan) addPackageCandidate(pkg debmeta.Package) error {
 	}
 	plan.seenDownloadID[identity] = true
 	plan.summary.PackagesToDownload++
+	plan.downloads = append(plan.downloads, plannedDownload{identity: identity, pkg: pkg})
 	if pkg.Size >= 0 {
 		plan.summary.EstimatedDownloadBytes += pkg.Size
 	} else {
 		plan.summary.UnknownSizePackages++
 	}
 	return nil
+}
+
+func (s *Service) recordPlannedPackage(packagePool *pool.Pool, store *state.Store, pkg debmeta.Package, downloadedPackages map[string]string, seenDownloadedPackages map[string]bool) (string, bool, error) {
+	identity := packageIdentity(pkg)
+	if poolPath, ok := downloadedPackages[identity]; ok {
+		record := packageRecord(pkg, poolPath)
+		key, err := store.UpsertPackage(record)
+		if err != nil {
+			return "", false, err
+		}
+		if seenDownloadedPackages[identity] {
+			return key, true, nil
+		}
+		seenDownloadedPackages[identity] = true
+		return key, false, nil
+	}
+
+	expectedPoolChecksum := poolChecksum(pkg)
+	poolPath, err := pool.PathFor(pkg.Filename, expectedPoolChecksum)
+	if err != nil {
+		return "", false, err
+	}
+	ok, err := packagePool.Verify(poolPath, expectedPoolChecksum)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, fmt.Errorf("planned package %q was not downloaded and is not present in package pool", pkg.Filename)
+	}
+
+	record := packageRecord(pkg, poolPath)
+	key, err := store.UpsertPackage(record)
+	return key, true, err
 }
 
 func (s *Service) fetchRelease(ctx context.Context, baseURL, suite string) (*debmeta.Release, error) {
@@ -278,46 +319,6 @@ func (s *Service) fetchPackageIndex(ctx context.Context, baseURL, suite, compone
 		return packages, upstreamIndexRecord(path.Join("dists", suite, indexPath), expected), nil
 	}
 	return nil, state.UpstreamIndexRecord{}, fmt.Errorf("missing Packages index for component %q architecture %q", component, arch)
-}
-
-func (s *Service) ensurePackage(ctx context.Context, baseURL string, packagePool *pool.Pool, store *state.Store, pkg debmeta.Package) (string, bool, error) {
-	expectedPoolChecksum := poolChecksum(pkg)
-	poolPath, err := pool.PathFor(pkg.Filename, expectedPoolChecksum)
-	if err == nil {
-		ok, err := packagePool.Verify(poolPath, expectedPoolChecksum)
-		if err != nil {
-			return "", false, err
-		}
-		if ok {
-			record := packageRecord(pkg, poolPath)
-			key, err := store.UpsertPackage(record)
-			return key, true, err
-		}
-	}
-
-	packageURL, err := PackageURL(baseURL, pkg.Filename)
-	if err != nil {
-		return "", false, err
-	}
-	tmpDir, err := os.MkdirTemp("", "mirrors-fetch-*")
-	if err != nil {
-		return "", false, err
-	}
-	defer func() {
-		_ = os.RemoveAll(tmpDir)
-	}()
-
-	tmpPath := filepath.Join(tmpDir, filepath.Base(pkg.Filename))
-	if err := s.downloader.DownloadPackage(ctx, packageURL, tmpPath, downloadChecksum(pkg)); err != nil {
-		return "", false, err
-	}
-	imported, err := packagePool.Import(tmpPath, pkg.Filename, expectedPoolChecksum)
-	if err != nil {
-		return "", false, err
-	}
-	record := packageRecord(pkg, imported.Path)
-	key, err := store.UpsertPackage(record)
-	return key, false, err
 }
 
 func parsePackagesBytes(data []byte, compression string) ([]debmeta.Package, error) {

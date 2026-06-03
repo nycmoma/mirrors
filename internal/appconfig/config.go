@@ -18,7 +18,7 @@ const (
 	defaultHTTPTimeout     = 30 * time.Second
 	defaultHTTPRetries     = 3
 	defaultHTTPRetryDelay  = time.Second
-	defaultDownloadThreads = 1
+	defaultDownloadThreads = 4
 )
 
 // Config contains application-wide defaults from ~/.config/mirrors.conf.

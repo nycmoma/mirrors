@@ -11,10 +11,10 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 13: Update Planning and Disk Safety
+Phase 14: Download Concurrency and Progress
 ```
 
-Phase 14 download concurrency and progress work is next.
+Phase 15 logging work is next.
 
 Implemented packages and behavior:
 
@@ -32,6 +32,7 @@ Implemented packages and behavior:
   - retry handling
   - metadata fetch
   - package/file download
+  - package download byte-progress callbacks
   - size and checksum verification
   - `HEAD` length lookup
   - testable downloader interface
@@ -59,6 +60,8 @@ Implemented packages and behavior:
   - Release validation for configured origin, label, components, and architectures
   - download planning before package downloads
   - disk-space checking before package downloads
+  - bounded concurrent package downloads using `download_threads`
+  - package download progress events
   - package index fetching and parsing
   - missing package downloads into the local package pool
   - idempotent package reuse when files already exist in the pool
@@ -92,6 +95,7 @@ Implemented packages and behavior:
   - `config generate` starter config rendering from a Release/InRelease URL
   - global application config loading and validation
   - download estimate output for package-consuming workflows
+  - interactive package download progress bar with line-based log fallback
   - `daily`, `weekly`, and `monthly` update workflow aliases
   - cleanup summary reporting for snapshots and unreferenced package pool files
   - cleanup retention with `--days` or `--all`
@@ -117,7 +121,7 @@ logs_root = ~/.mirrors/.logs
 http_timeout = 30s
 http_retries = 3
 http_retry_delay = 1s
-download_threads = 1
+download_threads = 4
 ```
 
 `data_root` stores SQLite DB files under `db/` and package files under

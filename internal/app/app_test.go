@@ -183,6 +183,72 @@ func TestPrintDownloadPlanIncludesEstimateAndWarnings(t *testing.T) {
 	}
 }
 
+func TestTerminalProgressReporterPrintsLineFallbackWhenCaptured(t *testing.T) {
+	output, err := captureStdout(func() error {
+		reporter := newTerminalProgressReporter()
+		reporter.Start(mirror.DownloadProgressStart{
+			TotalPackages:   1,
+			TotalKnownBytes: 2048,
+			ReusedPackages:  3,
+		})
+		reporter.Bytes(mirror.DownloadProgressBytes{
+			Filename:     "pool/main/d/demo/demo_1.0_amd64.deb",
+			CurrentBytes: 2048,
+			TotalBytes:   2048,
+		})
+		reporter.PackageComplete(mirror.DownloadProgressPackageComplete{
+			Filename: "pool/main/d/demo/demo_1.0_amd64.deb",
+			Size:     2048,
+		})
+		reporter.Finish(mirror.DownloadProgressFinish{
+			DownloadedPackages: 1,
+			ReusedPackages:     3,
+			TotalPackages:      1,
+			DownloadedBytes:    2048,
+			TotalKnownBytes:    2048,
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("captureStdout returned error: %v", err)
+	}
+	for _, want := range []string{
+		"Downloading packages: 1 package(s), 2.0 KiB known",
+		"Downloaded 1/1: demo_1.0_amd64.deb",
+		"Download complete: downloaded 1, reused 3, failed 0",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestTerminalProgressReporterUsesAbsolutePackageBytes(t *testing.T) {
+	reporter := newTerminalProgressReporter()
+	reporter.Start(mirror.DownloadProgressStart{
+		TotalPackages:   1,
+		TotalKnownBytes: 2048,
+	})
+	reporter.Bytes(mirror.DownloadProgressBytes{
+		Filename:     "pool/main/d/demo/demo_1.0_amd64.deb",
+		CurrentBytes: 1024,
+		TotalBytes:   2048,
+	})
+	reporter.Bytes(mirror.DownloadProgressBytes{
+		Filename:     "pool/main/d/demo/demo_1.0_amd64.deb",
+		CurrentBytes: 512,
+		TotalBytes:   2048,
+	})
+	reporter.Bytes(mirror.DownloadProgressBytes{
+		Filename:     "pool/main/d/demo/demo_1.0_amd64.deb",
+		CurrentBytes: 2048,
+		TotalBytes:   2048,
+	})
+	if reporter.knownBytes != 2048 {
+		t.Fatalf("expected absolute byte progress to avoid retry over-counting, got %d", reporter.knownBytes)
+	}
+}
+
 func TestValidateExistingMirrorConfigAllowsMatchingStoredConfig(t *testing.T) {
 	home := t.TempDir()
 	setAppTestHome(t, home)

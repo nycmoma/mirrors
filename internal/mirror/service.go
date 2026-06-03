@@ -22,6 +22,8 @@ type Service struct {
 	downloader           download.Downloader
 	diskChecker          DiskSpaceChecker
 	downloadPlanReporter func(DownloadPlan)
+	progressReporter     ProgressReporter
+	downloadThreads      int
 }
 
 // Option configures a Service.
@@ -65,6 +67,20 @@ func WithDownloadPlanReporter(reporter func(DownloadPlan)) Option {
 	}
 }
 
+// WithProgressReporter sets the reporter used for package download progress.
+func WithProgressReporter(reporter ProgressReporter) Option {
+	return func(service *Service) {
+		service.progressReporter = reporter
+	}
+}
+
+// WithDownloadThreads sets package download concurrency. Values below 1 become 1.
+func WithDownloadThreads(threads int) Option {
+	return func(service *Service) {
+		service.downloadThreads = threads
+	}
+}
+
 // NewService creates a mirror service.
 func NewService(options ...Option) (*Service, error) {
 	home, err := os.UserHomeDir()
@@ -72,11 +88,13 @@ func NewService(options ...Option) (*Service, error) {
 		return nil, err
 	}
 	service := &Service{
-		home:        home,
-		dbDir:       config.DBDirForHome(home),
-		packageDir:  config.PackageDirForHome(home),
-		downloader:  download.NewClient(),
-		diskChecker: statfsDiskSpaceChecker{},
+		home:             home,
+		dbDir:            config.DBDirForHome(home),
+		packageDir:       config.PackageDirForHome(home),
+		downloader:       download.NewClient(),
+		diskChecker:      statfsDiskSpaceChecker{},
+		progressReporter: noopProgressReporter{},
+		downloadThreads:  4,
 	}
 	for _, option := range options {
 		option(service)
@@ -95,6 +113,12 @@ func NewService(options ...Option) (*Service, error) {
 	}
 	if service.diskChecker == nil {
 		return nil, fmt.Errorf("disk space checker is required")
+	}
+	if service.progressReporter == nil {
+		service.progressReporter = noopProgressReporter{}
+	}
+	if service.downloadThreads < 1 {
+		service.downloadThreads = 1
 	}
 	return service, nil
 }

@@ -44,11 +44,16 @@ func (client *Client) FetchMetadata(ctx context.Context, rawURL string, expected
 
 // DownloadPackage downloads a package or metadata file to destination.
 func (client *Client) DownloadPackage(ctx context.Context, rawURL, destination string, expected *Checksum) error {
+	return client.DownloadPackageWithProgress(ctx, rawURL, destination, expected, nil)
+}
+
+// DownloadPackageWithProgress downloads a package and reports current bytes for each attempt.
+func (client *Client) DownloadPackageWithProgress(ctx context.Context, rawURL, destination string, expected *Checksum, onBytes func(int64)) error {
 	var tempPath string
 
 	err := client.doWithRetry(ctx, func() error {
 		var err error
-		tempPath, err = client.downloadOnce(ctx, rawURL, destination, expected)
+		tempPath, err = client.downloadOnce(ctx, rawURL, destination, expected, onBytes)
 		return err
 	})
 	if err != nil {
@@ -118,7 +123,7 @@ func (client *Client) get(ctx context.Context, rawURL string) (io.ReadCloser, er
 	return resp.Body, nil
 }
 
-func (client *Client) downloadOnce(ctx context.Context, rawURL, destination string, expected *Checksum) (string, error) {
+func (client *Client) downloadOnce(ctx context.Context, rawURL, destination string, expected *Checksum, onBytes func(int64)) (string, error) {
 	body, err := client.get(ctx, rawURL)
 	if err != nil {
 		return "", err
@@ -136,7 +141,11 @@ func (client *Client) downloadOnce(ctx context.Context, rawURL, destination stri
 	tempPath := tempFile.Name()
 
 	checksummer := newChecksumWriter()
-	_, copyErr := io.Copy(io.MultiWriter(tempFile, checksummer), body)
+	writers := []io.Writer{tempFile, checksummer}
+	if onBytes != nil {
+		writers = append(writers, &progressWriter{onBytes: onBytes})
+	}
+	_, copyErr := io.Copy(io.MultiWriter(writers...), body)
 	closeErr := tempFile.Close()
 	if copyErr != nil {
 		_ = os.Remove(tempPath)
@@ -153,4 +162,15 @@ func (client *Client) downloadOnce(ctx context.Context, rawURL, destination stri
 	}
 
 	return tempPath, nil
+}
+
+type progressWriter struct {
+	onBytes func(int64)
+	current int64
+}
+
+func (writer *progressWriter) Write(data []byte) (int, error) {
+	writer.current += int64(len(data))
+	writer.onBytes(writer.current)
+	return len(data), nil
 }

@@ -35,7 +35,7 @@ func TestLoadUsesDefaultsWhenConfigIsMissing(t *testing.T) {
 	if cfg.HTTPRetryDelay != time.Second {
 		t.Fatalf("unexpected retry delay: %v", cfg.HTTPRetryDelay)
 	}
-	if cfg.DownloadThreads != 1 {
+	if cfg.DownloadThreads != 4 {
 		t.Fatalf("unexpected download threads: %d", cfg.DownloadThreads)
 	}
 	if _, err := os.Stat(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "mirrors.conf")); err != nil {
