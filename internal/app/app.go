@@ -137,18 +137,38 @@ func runConfigWithConfigAndLogger(cmd cli.Command, appCfg appconfig.Config, logg
 			return fmt.Errorf("missing config or name. Use: mirror config show -c <config_file> or mirror config show -n <mirror_name>")
 		}
 		if cmd.ConfigPath == "" {
-			cfg, err := state.LoadMirrorConfig(appCfg.DBPath(cmd.NameRef))
+			dbCfg, err := state.LoadMirrorConfig(appCfg.DBPath(cmd.NameRef))
 			if err != nil {
 				return err
 			}
-			fmt.Print(cfg.String())
+			active := dbCfg
+			var previous *config.Mirror
+			if strings.TrimSpace(dbCfg.ConfigPath) != "" {
+				fileCfg, err := config.Load(dbCfg.ConfigPath)
+				if err != nil {
+					reportConfigRefreshWarning(logger, cmd.NameRef, dbCfg.ConfigPath, err)
+				} else if err := config.Validate(fileCfg); err != nil {
+					reportConfigRefreshWarning(logger, cmd.NameRef, dbCfg.ConfigPath, err)
+				} else if fileCfg.Name != dbCfg.Name {
+					reportConfigRefreshWarning(logger, cmd.NameRef, dbCfg.ConfigPath, fmt.Errorf("config name changed to %q", fileCfg.Name))
+				} else {
+					active = fileCfg
+					previous = &dbCfg
+				}
+			}
+			fmt.Print(renderMirrorConfigWithPrevious(active, previous))
 			return nil
 		}
 		cfg, err := config.Load(cmd.ConfigPath)
 		if err != nil {
 			return err
 		}
-		fmt.Print(cfg.String())
+		var previous *config.Mirror
+		dbCfg, err := state.LoadMirrorConfig(appCfg.DBPath(cfg.Name))
+		if err == nil {
+			previous = &dbCfg
+		}
+		fmt.Print(renderMirrorConfigWithPrevious(cfg, previous))
 		return nil
 	default:
 		return fmt.Errorf("unknown config command %q. Valid config commands: generate, validate, show", cmd.Subcommand)
@@ -212,34 +232,26 @@ func runPublishUpdate(action string, mirrorService *mirror.Service, appCfg appco
 }
 
 func runPublishUpdateWithLogger(action string, mirrorService *mirror.Service, appCfg appconfig.Config, cfg config.Mirror, logger logging.Logger) error {
-	fetchResult, err := mirrorService.Fetch(context.Background(), cfg)
-	if err != nil {
+	state := &workflowState{
+		action:        action,
+		appCfg:        appCfg,
+		cfg:           cfg,
+		logger:        logger,
+		mirrorService: mirrorService,
+	}
+	if err := runWorkflowEvents(context.Background(), state, []workflowEvent{
+		eventFetch(),
+		eventCreateSnapshot(),
+		eventPublishSelectedSnapshot(),
+		eventSignPublished(),
+		eventCommitPublishedState(),
+	}); err != nil {
 		return err
 	}
-	snapshotService, err := snapshot.NewService(snapshot.WithDBDir(appCfg.DBDir()))
-	if err != nil {
-		return err
-	}
-	updateResult, err := snapshotService.CreateCurrent(cfg)
-	if err != nil {
-		return err
-	}
-	publishService, err := publish.NewService(publish.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir(), appCfg.MirrorsRoot))
-	if err != nil {
-		return err
-	}
-	publishResult, err := publishService.PublishSelected(cfg)
-	if err != nil {
-		return err
-	}
-	signResult, err := signPublishedWithLogger(context.Background(), cfg, publishResult, logger)
-	if err != nil {
-		return err
-	}
-	printFetchResult(action+" fetch", fetchResult)
-	printUpdateResult(updateResult)
-	printPublishResult(publishResult)
-	printSigningResult(signResult)
+	printFetchResult(action+" fetch", state.fetchResult)
+	printUpdateResult(state.updateResult)
+	printPublishResult(state.publishResult)
+	printSigningResult(state.signingResult)
 	return nil
 }
 
@@ -266,39 +278,36 @@ func runMirrorCommandWithConfigAndLogger(cmd cli.Command, appCfg appconfig.Confi
 	if err != nil {
 		return err
 	}
+	var commandConfig config.Mirror
+	if cmd.Name != "destroy" && cmd.URL == "" {
+		commandConfig, err = configForMirrorCommand(cmd, appCfg, name, logger)
+		if err != nil {
+			return err
+		}
+	}
 	service, err := newMirrorServiceWithLogger(appCfg, logger)
 	if err != nil {
 		return err
 	}
 	switch cmd.Name {
 	case "rollback":
-		snapshotService, err := snapshot.NewService(snapshot.WithDBDir(appCfg.DBDir()))
-		if err != nil {
+		state := &workflowState{
+			action: "rollback",
+			appCfg: appCfg,
+			cfg:    commandConfig,
+			logger: logger,
+		}
+		if err := runWorkflowEvents(context.Background(), state, []workflowEvent{
+			eventSelectRollbackSnapshot(cmd.Date, cmd.ID),
+			eventPublishSelectedSnapshot(),
+			eventSignPublished(),
+			eventCommitPublishedState(),
+		}); err != nil {
 			return err
 		}
-		result, err := snapshotService.Rollback(name, cmd.Date, cmd.ID)
-		if err != nil {
-			return err
-		}
-		printRollbackResult(result)
-		cfg, err := configForMirrorCommand(cmd, appCfg, name)
-		if err != nil {
-			return err
-		}
-		publishService, err := publish.NewService(publish.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir(), appCfg.MirrorsRoot))
-		if err != nil {
-			return err
-		}
-		publishResult, err := publishService.PublishSelected(cfg)
-		if err != nil {
-			return err
-		}
-		signResult, err := signPublishedWithLogger(context.Background(), cfg, publishResult, logger)
-		if err != nil {
-			return err
-		}
-		printPublishResult(publishResult)
-		printSigningResult(signResult)
+		printRollbackResult(state.rollbackResult)
+		printPublishResult(state.publishResult)
+		printSigningResult(state.signingResult)
 		return nil
 	case "info":
 		return runInfo(cmd, service, appCfg, name)
@@ -362,7 +371,7 @@ func runListWithConfigAndLogger(cmd cli.Command, appCfg appconfig.Config, logger
 		return nil
 	}
 	for _, summary := range summaries {
-		printSummary(summary)
+		printListItem(summary, appCfg)
 	}
 	return nil
 }
@@ -451,18 +460,35 @@ func validateMirrorIdentity(cmd cli.Command) error {
 	return nil
 }
 
-func configForMirrorCommand(cmd cli.Command, appCfg appconfig.Config, name string) (config.Mirror, error) {
+func configForMirrorCommand(cmd cli.Command, appCfg appconfig.Config, name string, logger logging.Logger) (config.Mirror, error) {
 	if cmd.ConfigPath != "" {
 		cfg, err := config.Load(cmd.ConfigPath)
 		if err != nil {
+			reportConfigRefreshWarning(logger, name, cmd.ConfigPath, err)
+			if strings.TrimSpace(name) != "" {
+				return refreshMirrorConfigByName(name, appCfg, logger)
+			}
 			return config.Mirror{}, err
 		}
 		if err := config.Validate(cfg); err != nil {
+			reportConfigRefreshWarning(logger, name, cmd.ConfigPath, err)
+			if strings.TrimSpace(name) != "" {
+				return refreshMirrorConfigByName(name, appCfg, logger)
+			}
 			return config.Mirror{}, err
 		}
-		return cfg, nil
+		if strings.TrimSpace(name) != "" && cfg.Name != name {
+			err := fmt.Errorf("config name changed to %q", cfg.Name)
+			reportConfigRefreshWarning(logger, name, cmd.ConfigPath, err)
+			return refreshMirrorConfigByName(name, appCfg, logger)
+		}
+		if err := saveMirrorConfigWithConfig(cfg, appCfg); err != nil {
+			return config.Mirror{}, err
+		}
+		logger.Infof("config refreshed mirror=%q config_path=%q source=command", cfg.Name, cfg.ConfigPath)
+		return state.LoadMirrorConfig(appCfg.DBPath(cfg.Name))
 	}
-	return state.LoadMirrorConfig(appCfg.DBPath(name))
+	return refreshMirrorConfigByName(name, appCfg, logger)
 }
 
 func refreshedUpdateConfig(cmd cli.Command, appCfg appconfig.Config, logger logging.Logger) (config.Mirror, error) {
@@ -503,21 +529,25 @@ func refreshMirrorConfigByName(name string, appCfg appconfig.Config, logger logg
 		return config.Mirror{}, err
 	}
 	if strings.TrimSpace(stored.ConfigPath) == "" {
+		reportConfigRefreshWarning(logger, name, stored.ConfigPath, fmt.Errorf("no stored config path"))
 		_ = store.Close()
-		return config.Mirror{}, fmt.Errorf("mirror %q has no stored config path; recreate it with --config before DB-backed workflows can refresh it", name)
+		return stored, nil
 	}
 	refreshed, err := config.Load(stored.ConfigPath)
 	if err != nil {
+		reportConfigRefreshWarning(logger, name, stored.ConfigPath, err)
 		_ = store.Close()
-		return config.Mirror{}, fmt.Errorf("refresh mirror %q config %q: %w", name, stored.ConfigPath, err)
+		return stored, nil
 	}
 	if err := config.Validate(refreshed); err != nil {
+		reportConfigRefreshWarning(logger, name, stored.ConfigPath, err)
 		_ = store.Close()
-		return config.Mirror{}, fmt.Errorf("refresh mirror %q config %q: %w", name, stored.ConfigPath, err)
+		return stored, nil
 	}
 	if refreshed.Name != name {
+		reportConfigRefreshWarning(logger, name, stored.ConfigPath, fmt.Errorf("config name changed to %q", refreshed.Name))
 		_ = store.Close()
-		return config.Mirror{}, fmt.Errorf("refresh mirror %q config %q: config name changed to %q", name, stored.ConfigPath, refreshed.Name)
+		return stored, nil
 	}
 	if err := store.SaveMirrorConfig(refreshed); err != nil {
 		_ = store.Close()
@@ -533,6 +563,16 @@ func refreshMirrorConfigByName(name string, appCfg appconfig.Config, logger logg
 	}
 	logger.Infof("config refreshed mirror=%q config_path=%q source=db", cfg.Name, cfg.ConfigPath)
 	return cfg, nil
+}
+
+func reportConfigRefreshWarning(logger logging.Logger, name, path string, err error) {
+	message := fmt.Sprintf("Warning: could not read stored config for mirror %q", name)
+	if strings.TrimSpace(path) != "" {
+		message = fmt.Sprintf("Warning: could not read stored config %q for mirror %q", path, name)
+	}
+	message += fmt.Sprintf(": %v. Restore or fix the config file; continuing with DB values when available.", err)
+	fmt.Println(message)
+	logger.Warnf("%s", message)
 }
 
 func saveMirrorConfigWithConfig(cfg config.Mirror, appCfg appconfig.Config) error {
@@ -1367,11 +1407,131 @@ func printConfigValidationResult(path string, cfg config.Mirror, upstream []conf
 	}
 }
 
+func renderMirrorConfigWithPrevious(cfg config.Mirror, previous *config.Mirror) string {
+	type line struct {
+		key    string
+		value  string
+		old    string
+		hasOld bool
+	}
+	lines := []line{
+		{key: "name", value: cfg.Name},
+		{key: "url", value: cfg.URL},
+		{key: "dist", value: strings.Join(cfg.Dists, ", ")},
+		{key: "release", value: strings.Join(cfg.Releases, ", ")},
+		{key: "origin", value: cfg.Origin},
+		{key: "label", value: cfg.Label},
+		{key: "arch", value: strings.Join(cfg.Arch, ", ")},
+		{key: "components", value: strings.Join(cfg.Components, ", ")},
+		{key: "path", value: cfg.Path},
+		{key: "merge", value: cfg.Merge.String()},
+		{key: "update", value: cfg.UpdatePolicy},
+		{key: "server", value: cfg.Server},
+		{key: "sign", value: yesNo(!cfg.Signing.Disabled)},
+		{key: "gpg_home", value: cfg.Signing.GPGHome},
+		{key: "gpg_key", value: cfg.Signing.GPGKey},
+		{key: "gpg_passphrase_file", value: cfg.Signing.GPGPassphraseFile},
+	}
+	if previous != nil {
+		oldValues := map[string]string{
+			"name":                previous.Name,
+			"url":                 previous.URL,
+			"dist":                strings.Join(previous.Dists, ", "),
+			"release":             strings.Join(previous.Releases, ", "),
+			"origin":              previous.Origin,
+			"label":               previous.Label,
+			"arch":                strings.Join(previous.Arch, ", "),
+			"components":          strings.Join(previous.Components, ", "),
+			"path":                previous.Path,
+			"merge":               previous.Merge.String(),
+			"update":              previous.UpdatePolicy,
+			"server":              previous.Server,
+			"sign":                yesNo(!previous.Signing.Disabled),
+			"gpg_home":            previous.Signing.GPGHome,
+			"gpg_key":             previous.Signing.GPGKey,
+			"gpg_passphrase_file": previous.Signing.GPGPassphraseFile,
+		}
+		for index := range lines {
+			if old := oldValues[lines[index].key]; old != lines[index].value {
+				lines[index].old = old
+				lines[index].hasOld = true
+			}
+		}
+	}
+
+	var builder strings.Builder
+	builder.WriteString("[mirror]\n")
+	for _, item := range lines {
+		fmt.Fprintf(&builder, "%s = %s", item.key, item.value)
+		if item.hasOld {
+			fmt.Fprintf(&builder, " (was %q)", item.old)
+		}
+		builder.WriteByte('\n')
+	}
+	return builder.String()
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
 func displayReleaseValue(value string) string {
 	if value == "" {
 		return "(empty)"
 	}
 	return value
+}
+
+func printListItem(summary mirror.Summary, appCfg appconfig.Config) {
+	fmt.Printf("%-24s %s\n", summary.Config.Name, compactHumanSize(listMirrorSize(summary, appCfg)))
+}
+
+func listMirrorSize(summary mirror.Summary, appCfg appconfig.Config) int64 {
+	size := summary.Stats.KnownPackageSizeBytes
+	if size == 0 {
+		size = summary.Stats.MirrorSizeBytes
+	}
+	if info, err := os.Stat(summary.DBPath); err == nil {
+		size += info.Size()
+	}
+	if summary.Stats.Published != nil && !summary.Stats.Published.Hidden {
+		size += publishedMetadataSize(summary.Stats.Published.Path, appCfg.MirrorsRoot)
+	}
+	return size
+}
+
+func publishedMetadataSize(rawPath, mirrorsRoot string) int64 {
+	if strings.TrimSpace(rawPath) == "" {
+		return 0
+	}
+	root := rawPath
+	if !filepath.IsAbs(root) {
+		root = filepath.Join(mirrorsRoot, filepath.Clean(root))
+	}
+	return directorySize(filepath.Join(root, "dists"))
+}
+
+func directorySize(root string) int64 {
+	var size int64
+	if _, err := os.Stat(root); err != nil {
+		return 0
+	}
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		size += info.Size()
+		_ = path
+		return nil
+	})
+	return size
 }
 
 func printSummary(summary mirror.Summary) {
@@ -1386,6 +1546,17 @@ func printSummary(summary mirror.Summary) {
 	fmt.Printf("Snapshots: %d\n", summary.Stats.SnapshotCount)
 	if summary.Stats.Published != nil {
 		fmt.Printf("Selected snapshot: %s\n", summary.Stats.Published.SnapshotName)
+		fmt.Printf("Published path: %s\n", summary.Stats.Published.Path)
+		fmt.Printf("Published suite: %s\n", summary.Stats.Published.Suite)
+		if summary.Stats.Published.Component != "" {
+			fmt.Printf("Published component: %s\n", summary.Stats.Published.Component)
+		}
+		if summary.Stats.Published.Hidden {
+			fmt.Println("Published state: hidden")
+		} else {
+			fmt.Println("Published state: visible")
+		}
+		fmt.Printf("Published at: %s\n", summary.Stats.Published.PublishedAt.Format("2006-01-02T15:04:05Z07:00"))
 	} else {
 		fmt.Println("Selected snapshot: none")
 	}
@@ -1532,6 +1703,26 @@ func humanSize(size int64) string {
 		return fmt.Sprintf("%.0f %s", value, units[unit])
 	}
 	return fmt.Sprintf("%.1f %s", value, units[unit])
+}
+
+func compactHumanSize(size int64) string {
+	if size < 0 {
+		return "0B"
+	}
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	value := float64(size)
+	unit := 0
+	for value >= 1000 && unit < len(units)-1 {
+		value /= 1000
+		unit++
+	}
+	if unit == 0 {
+		return fmt.Sprintf("%d%s", size, units[unit])
+	}
+	if value >= 10 {
+		return fmt.Sprintf("%.0f%s", value, units[unit])
+	}
+	return fmt.Sprintf("%.1f%s", value, units[unit])
 }
 
 func printSnapshotList(snapshots []snapshot.Summary) {

@@ -11,11 +11,10 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 16: Mirror Update Policy
+Phase 17: Workflow Consistency and State Ordering
 ```
 
-Phase 17 workflow consistency and state ordering work is planned but not
-started.
+Phase 18 documentation, command output, and log polish is next.
 
 Implemented packages and behavior:
 
@@ -96,12 +95,18 @@ Implemented packages and behavior:
   - diagnostic logging without passphrase values
 - App workflow support in `internal/app` currently includes:
   - `config generate` starter config rendering from a Release/InRelease URL
+  - `config show` DB-vs-config-file comparison annotations where both sources
+    are available
   - global application config loading and validation
   - optional file-backed diagnostic logging
   - download estimate output for package-consuming workflows
   - interactive package download progress bar with line-based log fallback
+  - explicit workflow event pipelines for create/update and rollback ordering
+  - config refresh warnings with DB fallback for DB-backed workflows
+  - publish-state commits only after publish and signing succeed
   - `daily`, `weekly`, and `monthly` batch update commands for CI/CD or
     manual scheduling
+  - compact `list` output with mirror name and human-readable local size
   - cleanup summary reporting for snapshots and unreferenced package pool files
   - cleanup retention with `--days` or `--all`
   - published snapshot preservation during cleanup

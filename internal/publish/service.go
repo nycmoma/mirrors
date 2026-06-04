@@ -107,7 +107,8 @@ type Result struct {
 
 // PublishSelected publishes the currently selected snapshot group for cfg.
 func (s *Service) PublishSelected(cfg config.Mirror) (Result, error) {
-	if err := config.Validate(cfg); err != nil {
+	published, result, err := s.publishSelectedSnapshot(cfg)
+	if err != nil {
 		return Result{}, err
 	}
 	store, err := state.Open(s.dbPath(cfg.Name))
@@ -117,22 +118,9 @@ func (s *Service) PublishSelected(cfg config.Mirror) (Result, error) {
 	defer func() {
 		_ = store.Close()
 	}()
-
-	published, err := store.Published()
-	if err != nil {
-		return Result{}, err
-	}
-	snapshots, err := s.resolveSnapshotGroup(store, cfg, published.SnapshotName)
-	if err != nil {
-		return Result{}, err
-	}
-	result, err := s.publishSnapshots(store, cfg, snapshots)
-	if err != nil {
-		return Result{}, err
-	}
 	if err := store.SetPublished(state.PublishedRecord{
 		SnapshotName: published.SnapshotName,
-		Path:         cfg.Path,
+		Path:         result.Path,
 		Suite:        result.Suite,
 		Component:    firstComponent(cfg),
 		PublishedAt:  s.now(),
@@ -140,6 +128,57 @@ func (s *Service) PublishSelected(cfg config.Mirror) (Result, error) {
 		return Result{}, err
 	}
 	return result, nil
+}
+
+// PublishSnapshot publishes the requested snapshot group for cfg without
+// changing published DB state. Workflow code commits state after signing.
+func (s *Service) PublishSnapshot(cfg config.Mirror, selectedSnapshot string) (Result, error) {
+	if err := config.Validate(cfg); err != nil {
+		return Result{}, err
+	}
+	if strings.TrimSpace(selectedSnapshot) == "" {
+		return Result{}, fmt.Errorf("selected snapshot is required")
+	}
+	store, err := state.Open(s.dbPath(cfg.Name))
+	if err != nil {
+		return Result{}, err
+	}
+	defer func() {
+		_ = store.Close()
+	}()
+
+	snapshots, err := s.resolveSnapshotGroup(store, cfg, selectedSnapshot)
+	if err != nil {
+		return Result{}, err
+	}
+	return s.publishSnapshots(store, cfg, snapshots)
+}
+
+func (s *Service) publishSelectedSnapshot(cfg config.Mirror) (state.PublishedRecord, Result, error) {
+	if err := config.Validate(cfg); err != nil {
+		return state.PublishedRecord{}, Result{}, err
+	}
+	store, err := state.Open(s.dbPath(cfg.Name))
+	if err != nil {
+		return state.PublishedRecord{}, Result{}, err
+	}
+	defer func() {
+		_ = store.Close()
+	}()
+
+	published, err := store.Published()
+	if err != nil {
+		return state.PublishedRecord{}, Result{}, err
+	}
+	snapshots, err := s.resolveSnapshotGroup(store, cfg, published.SnapshotName)
+	if err != nil {
+		return state.PublishedRecord{}, Result{}, err
+	}
+	result, err := s.publishSnapshots(store, cfg, snapshots)
+	if err != nil {
+		return state.PublishedRecord{}, Result{}, err
+	}
+	return published, result, nil
 }
 
 // Hide removes published repository output while preserving DB state and packages.
@@ -159,6 +198,7 @@ func (s *Service) Hide(mirrorName string) (Result, error) {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Result{}, err
 	}
+	hadPublished := !errors.Is(err, sql.ErrNoRows)
 	root, err := s.publishRoot(cfg.Path)
 	if err != nil {
 		return Result{}, err
@@ -166,10 +206,10 @@ func (s *Service) Hide(mirrorName string) (Result, error) {
 	if err := removePublishedRoot(root); err != nil {
 		return Result{}, err
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if hadPublished {
 		if err := store.SetPublished(state.PublishedRecord{
 			SnapshotName: published.SnapshotName,
-			Path:         cfg.Path,
+			Path:         root,
 			Suite:        published.Suite,
 			Component:    published.Component,
 			PublishedAt:  s.now(),

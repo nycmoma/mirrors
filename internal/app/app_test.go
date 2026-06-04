@@ -3,8 +3,13 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/sha512"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,6 +25,7 @@ import (
 	"mirrors/internal/download"
 	"mirrors/internal/logging"
 	"mirrors/internal/mirror"
+	"mirrors/internal/publish"
 	"mirrors/internal/state"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -182,6 +188,174 @@ func TestRunConfigValidatePrintsUpstreamOriginAndLabel(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
+	}
+}
+
+func TestRunConfigShowAnnotatesFileValuesChangedFromDB(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	store := openAppTestStore(t, home, "ubuntu")
+	defer func() {
+		_ = store.Close()
+	}()
+	configPath := writeAppMirrorConfig(t, "ubuntu", "weekly")
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.ConfigPath = configPath
+	cfg.UpdatePolicy = "never"
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+
+	output, err := captureStdout(func() error {
+		return runConfigWithConfigAndLogger(cli.Command{Name: "config", Subcommand: "show", NameRef: "ubuntu"}, appCfg, logging.Nop())
+	})
+	if err != nil {
+		t.Fatalf("runConfig returned error: %v", err)
+	}
+	if !strings.Contains(output, `update = weekly (was "never")`) {
+		t.Fatalf("output missing changed update annotation:\n%s", output)
+	}
+}
+
+func TestRunConfigShowWarnsAndFallsBackToDBWhenStoredConfigUnreadable(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	store := openAppTestStore(t, home, "ubuntu")
+	defer func() {
+		_ = store.Close()
+	}()
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.ConfigPath = filepath.Join(home, "missing.conf")
+	cfg.UpdatePolicy = "never"
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+
+	output, err := captureStdout(func() error {
+		return runConfigWithConfigAndLogger(cli.Command{Name: "config", Subcommand: "show", NameRef: "ubuntu"}, appCfg, logging.Nop())
+	})
+	if err != nil {
+		t.Fatalf("runConfig returned error: %v", err)
+	}
+	for _, want := range []string{
+		"Warning: could not read stored config",
+		"Restore or fix the config file",
+		"update = never",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunConfigShowByConfigAnnotatesFileValuesChangedFromDB(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	store := openAppTestStore(t, home, "ubuntu")
+	defer func() {
+		_ = store.Close()
+	}()
+	configPath := writeAppMirrorConfig(t, "ubuntu", "weekly")
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.ConfigPath = configPath
+	cfg.UpdatePolicy = "never"
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+
+	output, err := captureStdout(func() error {
+		return runConfigWithConfigAndLogger(cli.Command{Name: "config", Subcommand: "show", ConfigPath: configPath}, appCfg, logging.Nop())
+	})
+	if err != nil {
+		t.Fatalf("runConfig returned error: %v", err)
+	}
+	if !strings.Contains(output, `update = weekly (was "never")`) {
+		t.Fatalf("output missing changed update annotation:\n%s", output)
+	}
+}
+
+func TestDBBackedMirrorCommandsRefreshStoredConfigBeforeUse(t *testing.T) {
+	for _, command := range []string{"rollback", "hide", "cleanup", "info", "more-info"} {
+		t.Run(command, func(t *testing.T) {
+			home := t.TempDir()
+			appCfg := setAppTestHome(t, home)
+			store := openAppTestStore(t, home, "ubuntu")
+			defer func() {
+				_ = store.Close()
+			}()
+			configPath := writeAppMirrorConfig(t, "ubuntu", "weekly")
+			cfg, err := store.MirrorConfig()
+			if err != nil {
+				t.Fatalf("MirrorConfig returned error: %v", err)
+			}
+			cfg.ConfigPath = configPath
+			cfg.UpdatePolicy = "never"
+			cfg.Signing.Disabled = false
+			if err := store.SaveMirrorConfig(cfg); err != nil {
+				t.Fatalf("SaveMirrorConfig returned error: %v", err)
+			}
+			cmd := cli.Command{Name: command, NameRef: "ubuntu"}
+			prepareDBBackedCommandFixture(t, home, store, &cmd)
+
+			_, err = captureStdout(func() error {
+				return runMirrorCommandWithConfigAndLogger(cmd, appCfg, logging.Nop())
+			})
+			if err != nil {
+				t.Fatalf("runMirrorCommand returned error: %v", err)
+			}
+			refreshed, err := store.MirrorConfig()
+			if err != nil {
+				t.Fatalf("MirrorConfig refreshed returned error: %v", err)
+			}
+			if refreshed.UpdatePolicy != "weekly" || !refreshed.Signing.Disabled {
+				t.Fatalf("stored config was not refreshed from file: %#v", refreshed)
+			}
+		})
+	}
+}
+
+func TestDBBackedMirrorCommandsWarnAndContinueWhenStoredConfigMissing(t *testing.T) {
+	for _, command := range []string{"rollback", "hide", "cleanup", "info", "more-info"} {
+		t.Run(command, func(t *testing.T) {
+			home := t.TempDir()
+			appCfg := setAppTestHome(t, home)
+			store := openAppTestStore(t, home, "ubuntu")
+			defer func() {
+				_ = store.Close()
+			}()
+			cfg, err := store.MirrorConfig()
+			if err != nil {
+				t.Fatalf("MirrorConfig returned error: %v", err)
+			}
+			cfg.ConfigPath = filepath.Join(home, "missing.conf")
+			cfg.Signing.Disabled = true
+			if err := store.SaveMirrorConfig(cfg); err != nil {
+				t.Fatalf("SaveMirrorConfig returned error: %v", err)
+			}
+			cmd := cli.Command{Name: command, NameRef: "ubuntu"}
+			prepareDBBackedCommandFixture(t, home, store, &cmd)
+
+			output, err := captureStdout(func() error {
+				return runMirrorCommandWithConfigAndLogger(cmd, appCfg, logging.Nop())
+			})
+			if err != nil {
+				t.Fatalf("runMirrorCommand returned error: %v\n%s", err, output)
+			}
+			for _, want := range []string{"Warning: could not read stored config", "Restore or fix the config file"} {
+				if !strings.Contains(output, want) {
+					t.Fatalf("output missing %q:\n%s", want, output)
+				}
+			}
+		})
 	}
 }
 
@@ -760,6 +934,294 @@ func TestPeriodicBatchStopsOnDiskFailureDuringConfigRefresh(t *testing.T) {
 	}
 }
 
+func TestRollbackWorkflowCommitsPublishedStateAfterPublishAndSign(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	store := openAppTestStore(t, home, "ubuntu")
+	defer func() {
+		_ = store.Close()
+	}()
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.Signing.Disabled = true
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+	oldSnapshot := "ubuntu-focal-main_2026-05-27"
+	newSnapshot := "ubuntu-focal-main_2026-05-28"
+	seedPublishedSnapshot(t, store, oldSnapshot)
+	key := upsertAppTestPackage(t, store, "apt", "pool/main/a/apt/apt.deb")
+	writePoolFile(t, home, "pool/main/a/apt/apt.deb", "package")
+	if err := store.CreateSnapshot(state.SnapshotRecord{Name: newSnapshot, Kind: "regular", CreatedAt: testCleanupTime(newSnapshot)}, []string{key}); err != nil {
+		t.Fatalf("CreateSnapshot returned error: %v", err)
+	}
+
+	output, err := captureStdout(func() error {
+		return runMirrorCommandWithConfigAndLogger(cli.Command{Name: "rollback", NameRef: "ubuntu", ID: newSnapshot}, appCfg, logging.Nop())
+	})
+	if err != nil {
+		t.Fatalf("runMirrorCommand returned error: %v\n%s", err, output)
+	}
+	published, err := store.Published()
+	if err != nil {
+		t.Fatalf("Published returned error: %v", err)
+	}
+	if published.SnapshotName != newSnapshot {
+		t.Fatalf("published state was not committed after successful rollback: %#v", published)
+	}
+	if published.Path != filepath.Join(appCfg.MirrorsRoot, "preprod") {
+		t.Fatalf("expected actual published path, got %#v", published)
+	}
+	last, err := store.LastUpdate()
+	if err != nil {
+		t.Fatalf("LastUpdate returned error: %v", err)
+	}
+	if last.Action != "rollback" || !strings.Contains(last.Message, newSnapshot) {
+		t.Fatalf("unexpected update history: %#v", last)
+	}
+}
+
+func TestRollbackWorkflowDoesNotCommitPublishedStateWhenSigningFails(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	store := openAppTestStore(t, home, "ubuntu")
+	defer func() {
+		_ = store.Close()
+	}()
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.Signing.Disabled = false
+	cfg.Signing.GPGKey = "test-key"
+	cfg.Signing.GPGPassphraseFile = filepath.Join(home, "missing-passphrase")
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+	oldSnapshot := "ubuntu-focal-main_2026-05-27"
+	newSnapshot := "ubuntu-focal-main_2026-05-28"
+	seedPublishedSnapshot(t, store, oldSnapshot)
+	key := upsertAppTestPackage(t, store, "apt", "pool/main/a/apt/apt.deb")
+	writePoolFile(t, home, "pool/main/a/apt/apt.deb", "package")
+	if err := store.CreateSnapshot(state.SnapshotRecord{Name: newSnapshot, Kind: "regular", CreatedAt: testCleanupTime(newSnapshot)}, []string{key}); err != nil {
+		t.Fatalf("CreateSnapshot returned error: %v", err)
+	}
+
+	_, err = captureStdout(func() error {
+		return runMirrorCommandWithConfigAndLogger(cli.Command{Name: "rollback", NameRef: "ubuntu", ID: newSnapshot}, appCfg, logging.Nop())
+	})
+	if err == nil {
+		t.Fatal("expected signing failure")
+	}
+	published, err := store.Published()
+	if err != nil {
+		t.Fatalf("Published returned error: %v", err)
+	}
+	if published.SnapshotName != oldSnapshot {
+		t.Fatalf("published state changed despite signing failure: %#v", published)
+	}
+}
+
+func TestRunPublishUpdateDoesNotCreateSnapshotWhenFetchFails(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	repo := newAppRepoFixture("http://repo.test/ubuntu", "1.0", "package")
+	service, err := mirror.NewService(
+		mirror.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir()),
+		mirror.WithDownloader(&appFakeDownloader{files: map[string][]byte{}}),
+		mirror.WithDiskSpaceChecker(appDiskSpaceChecker{available: 1024}),
+	)
+	if err != nil {
+		t.Fatalf("NewService returned error: %v", err)
+	}
+
+	_, err = captureStdout(func() error {
+		return runPublishUpdateWithLogger("Update", service, appCfg, repo.config, logging.Nop())
+	})
+	if err == nil {
+		t.Fatal("expected fetch failure")
+	}
+	store, err := state.Open(appCfg.DBPath(repo.config.Name))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() {
+		_ = store.Close()
+	}()
+	snapshots, err := store.Snapshots()
+	if err != nil {
+		t.Fatalf("Snapshots returned error: %v", err)
+	}
+	if len(snapshots) != 0 {
+		t.Fatalf("failed fetch created snapshots: %#v", snapshots)
+	}
+}
+
+func TestRunPublishUpdateDoesNotCommitPublishedStateWhenPublishFails(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	repo := newAppRepoFixture("http://repo.test/ubuntu", "1.0", "package")
+	oldSnapshot := "ubuntu-focal-main_2026-05-27"
+	store := openAppTestStore(t, home, repo.config.Name)
+	seedPublishedSnapshot(t, store, oldSnapshot)
+	_ = store.Close()
+
+	service, err := mirror.NewService(
+		mirror.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir()),
+		mirror.WithDownloader(newAppFakeDownloader(repo.files)),
+		mirror.WithDiskSpaceChecker(appDiskSpaceChecker{available: 1024}),
+	)
+	if err != nil {
+		t.Fatalf("NewService returned error: %v", err)
+	}
+	restore := replaceWorkflowPublisher(func(_ appconfig.Config) (workflowPublisher, error) {
+		return failingWorkflowPublisher{err: fmt.Errorf("publish failed")}, nil
+	})
+	defer restore()
+
+	_, err = captureStdout(func() error {
+		return runPublishUpdateWithLogger("Update", service, appCfg, repo.config, logging.Nop())
+	})
+	if err == nil || !strings.Contains(err.Error(), "publish failed") {
+		t.Fatalf("expected publish failure, got %v", err)
+	}
+	store, err = state.Open(appCfg.DBPath(repo.config.Name))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() {
+		_ = store.Close()
+	}()
+	published, err := store.Published()
+	if err != nil {
+		t.Fatalf("Published returned error: %v", err)
+	}
+	if published.SnapshotName != oldSnapshot {
+		t.Fatalf("published state changed despite publish failure: %#v", published)
+	}
+	if _, err := store.Snapshot(mirror.SnapshotName("ubuntu-focal-main", localDate(time.Now()).Format("2006-01-02"))); err != nil {
+		t.Fatalf("clean fetch should create current snapshot before publish failure: %v", err)
+	}
+}
+
+func TestRunPublishUpdateDoesNotCommitPublishedStateWhenSigningFails(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	repo := newAppRepoFixture("http://repo.test/ubuntu", "1.0", "package")
+	repo.config.Signing.Disabled = false
+	repo.config.Signing.GPGKey = "test-key"
+	repo.config.Signing.GPGPassphraseFile = filepath.Join(home, "missing-passphrase")
+	oldSnapshot := "ubuntu-focal-main_2026-05-27"
+	store := openAppTestStore(t, home, repo.config.Name)
+	seedPublishedSnapshot(t, store, oldSnapshot)
+	_ = store.Close()
+
+	service, err := mirror.NewService(
+		mirror.WithStorageDirs(appCfg.DBDir(), appCfg.PackageDir()),
+		mirror.WithDownloader(newAppFakeDownloader(repo.files)),
+		mirror.WithDiskSpaceChecker(appDiskSpaceChecker{available: 1024}),
+	)
+	if err != nil {
+		t.Fatalf("NewService returned error: %v", err)
+	}
+	_, err = captureStdout(func() error {
+		return runPublishUpdateWithLogger("Update", service, appCfg, repo.config, logging.Nop())
+	})
+	if err == nil {
+		t.Fatal("expected signing failure")
+	}
+	store, err = state.Open(appCfg.DBPath(repo.config.Name))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer func() {
+		_ = store.Close()
+	}()
+	published, err := store.Published()
+	if err != nil {
+		t.Fatalf("Published returned error: %v", err)
+	}
+	if published.SnapshotName != oldSnapshot {
+		t.Fatalf("published state changed despite signing failure: %#v", published)
+	}
+}
+
+func TestRollbackWorkflowDoesNotCommitPublishedStateWhenPublishFails(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	store := openAppTestStore(t, home, "ubuntu")
+	defer func() {
+		_ = store.Close()
+	}()
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.Signing.Disabled = true
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+	oldSnapshot := "ubuntu-focal-main_2026-05-27"
+	newSnapshot := "ubuntu-focal-main_2026-05-28"
+	seedPublishedSnapshot(t, store, oldSnapshot)
+	if err := store.CreateSnapshot(state.SnapshotRecord{Name: newSnapshot, Kind: "regular", CreatedAt: testCleanupTime(newSnapshot)}, nil); err != nil {
+		t.Fatalf("CreateSnapshot returned error: %v", err)
+	}
+	restore := replaceWorkflowPublisher(func(_ appconfig.Config) (workflowPublisher, error) {
+		return failingWorkflowPublisher{err: fmt.Errorf("publish failed")}, nil
+	})
+	defer restore()
+
+	_, err = captureStdout(func() error {
+		return runMirrorCommandWithConfigAndLogger(cli.Command{Name: "rollback", NameRef: "ubuntu", ID: newSnapshot}, appCfg, logging.Nop())
+	})
+	if err == nil || !strings.Contains(err.Error(), "publish failed") {
+		t.Fatalf("expected publish failure, got %v", err)
+	}
+	published, err := store.Published()
+	if err != nil {
+		t.Fatalf("Published returned error: %v", err)
+	}
+	if published.SnapshotName != oldSnapshot {
+		t.Fatalf("published state changed despite rollback publish failure: %#v", published)
+	}
+}
+
+func TestHideDoesNotMarkPublishedStateHiddenWhenRemovalFails(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	store := openAppTestStore(t, home, "ubuntu")
+	defer func() {
+		_ = store.Close()
+	}()
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.Path = string(filepath.Separator)
+	cfg.Signing.Disabled = true
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+	seedPublishedSnapshot(t, store, "ubuntu-focal-main_2026-05-27")
+
+	_, err = captureStdout(func() error {
+		return runMirrorCommandWithConfigAndLogger(cli.Command{Name: "hide", NameRef: "ubuntu"}, appCfg, logging.Nop())
+	})
+	if err == nil {
+		t.Fatal("expected hide removal failure")
+	}
+	published, err := store.Published()
+	if err != nil {
+		t.Fatalf("Published returned error: %v", err)
+	}
+	if published.Hidden {
+		t.Fatalf("published state was marked hidden despite removal failure: %#v", published)
+	}
+}
+
 // TestPeriodicBatchContinuesAfterBrokenMirrorDB covers defensive DB enumeration:
 // one corrupt mirror DB must be reported as a per-mirror failure without
 // preventing healthy mirrors from being processed.
@@ -883,6 +1345,53 @@ func TestRunInfoReportsMirrorAndSnapshotSizes(t *testing.T) {
 	}
 }
 
+func TestRunListReportsCompactMirrorNameAndFullSize(t *testing.T) {
+	home := t.TempDir()
+	setAppTestHome(t, home)
+	store := openAppTestStore(t, home, "ubuntu")
+	defer func() {
+		_ = store.Close()
+	}()
+	key := upsertAppTestPackage(t, store, "apt", "pool/main/a/apt/apt.deb")
+	knownOnlyKey := upsertAppTestPackage(t, store, "known-only", "pool/main/k/known/known.deb")
+	pkg, err := store.Package(key)
+	if err != nil {
+		t.Fatalf("Package returned error: %v", err)
+	}
+	pkg.Size = 1536
+	if _, err := store.UpsertPackage(pkg); err != nil {
+		t.Fatalf("UpsertPackage returned error: %v", err)
+	}
+	knownOnly, err := store.Package(knownOnlyKey)
+	if err != nil {
+		t.Fatalf("Package known-only returned error: %v", err)
+	}
+	knownOnly.Size = 4096
+	if _, err := store.UpsertPackage(knownOnly); err != nil {
+		t.Fatalf("UpsertPackage known-only returned error: %v", err)
+	}
+	if err := store.ReplaceMirrorPackages([]string{key}); err != nil {
+		t.Fatalf("ReplaceMirrorPackages returned error: %v", err)
+	}
+
+	output, err := captureStdout(func() error {
+		return runList(cli.Command{Name: "list"})
+	})
+	if err != nil {
+		t.Fatalf("runList returned error: %v", err)
+	}
+	fields := strings.Fields(output)
+	if len(fields) != 2 || fields[0] != "ubuntu" {
+		t.Fatalf("expected compact list row '<name> <size>', got:\n%s", output)
+	}
+	if strings.Contains(output, "Mirror:") || strings.Contains(output, "Mirror size:") {
+		t.Fatalf("list should not print detailed summary output:\n%s", output)
+	}
+	if fields[1] == "1.5KB" {
+		t.Fatalf("list size should include known package bytes beyond current package membership, got:\n%s", output)
+	}
+}
+
 func TestRunMoreInfoOnlyListsPackages(t *testing.T) {
 	home := t.TempDir()
 	setAppTestHome(t, home)
@@ -1001,6 +1510,13 @@ func TestRunCleanupRemoveDeletesPackageFile(t *testing.T) {
 	}
 	if len(paths) != 0 {
 		t.Fatalf("expected package row cleanup, got candidates %#v", paths)
+	}
+	last, err := store.LastUpdate()
+	if err != nil {
+		t.Fatalf("LastUpdate returned error: %v", err)
+	}
+	if last.Action != "cleanup" || !strings.Contains(last.Message, "removed") {
+		t.Fatalf("unexpected cleanup history: %#v", last)
 	}
 }
 
@@ -1206,6 +1722,168 @@ func replaceUpdateWorkflow(fn func(string, *mirror.Service, appconfig.Config, co
 	return func() {
 		runUpdateWorkflow = old
 	}
+}
+
+func replaceWorkflowPublisher(fn func(appconfig.Config) (workflowPublisher, error)) func() {
+	old := newWorkflowPublisher
+	newWorkflowPublisher = fn
+	return func() {
+		newWorkflowPublisher = old
+	}
+}
+
+type failingWorkflowPublisher struct {
+	err error
+}
+
+func (p failingWorkflowPublisher) PublishSnapshot(config.Mirror, string) (publish.Result, error) {
+	return publish.Result{}, p.err
+}
+
+func prepareDBBackedCommandFixture(t *testing.T, home string, store *state.Store, cmd *cli.Command) {
+	t.Helper()
+	switch cmd.Name {
+	case "rollback":
+		target := "ubuntu-focal-main_2026-05-28"
+		if err := store.CreateSnapshot(state.SnapshotRecord{Name: target, Kind: "regular", CreatedAt: testCleanupTime(target)}, nil); err != nil {
+			t.Fatalf("CreateSnapshot returned error: %v", err)
+		}
+		cmd.ID = target
+	case "hide":
+		seedPublishedSnapshot(t, store, "ubuntu-focal-main_2026-05-27")
+	case "cleanup":
+		// Summary mode must run without a published snapshot.
+	case "info", "more-info":
+		// Read-only commands need only the stored mirror config.
+	default:
+		t.Fatalf("unexpected command %q", cmd.Name)
+	}
+}
+
+type appRepoFixture struct {
+	config     config.Mirror
+	files      map[string][]byte
+	packageURL string
+}
+
+func newAppRepoFixture(baseURL, version, payload string) appRepoFixture {
+	filename := fmt.Sprintf("pool/main/d/demo/demo_%s_amd64.deb", version)
+	packageURL := strings.TrimRight(baseURL, "/") + "/" + filename
+	payloadBytes := []byte(payload)
+	payloadSums := appChecksumBytes(payloadBytes)
+	packages := []byte(fmt.Sprintf(`Package: demo
+Version: %s
+Architecture: amd64
+Filename: %s
+Size: %d
+MD5sum: %s
+SHA1: %s
+SHA256: %s
+SHA512: %s
+
+`, version, filename, len(payloadBytes), payloadSums.md5, payloadSums.sha1, payloadSums.sha256, payloadSums.sha512))
+	packagesSums := appChecksumBytes(packages)
+	release := []byte(fmt.Sprintf(`Origin: Test
+Label: Test
+Suite: focal
+Codename: focal
+Architectures: amd64
+Components: main
+SHA256:
+ %s %d main/binary-amd64/Packages
+
+`, packagesSums.sha256, len(packages)))
+	files := map[string][]byte{
+		strings.TrimRight(baseURL, "/") + "/dists/focal/Release":                    release,
+		strings.TrimRight(baseURL, "/") + "/dists/focal/main/binary-amd64/Packages": packages,
+		packageURL: []byte(payload),
+	}
+	return appRepoFixture{
+		config: config.Mirror{
+			Name:       "ubuntu",
+			URL:        strings.TrimRight(baseURL, "/"),
+			Dists:      []string{"focal"},
+			Releases:   []string{"default"},
+			Origin:     "Test",
+			Label:      "Test",
+			Arch:       []string{"amd64"},
+			Components: []string{"main"},
+			Path:       "preprod",
+			Signing: config.Signing{
+				Disabled: true,
+			},
+		},
+		files:      files,
+		packageURL: packageURL,
+	}
+}
+
+type appChecksums struct {
+	md5    string
+	sha1   string
+	sha256 string
+	sha512 string
+}
+
+func appChecksumBytes(data []byte) appChecksums {
+	md5Sum := md5.Sum(data)
+	sha1Sum := sha1.Sum(data)
+	sha256Sum := sha256.Sum256(data)
+	sha512Sum := sha512.Sum512(data)
+	return appChecksums{
+		md5:    fmt.Sprintf("%x", md5Sum),
+		sha1:   fmt.Sprintf("%x", sha1Sum),
+		sha256: fmt.Sprintf("%x", sha256Sum),
+		sha512: fmt.Sprintf("%x", sha512Sum),
+	}
+}
+
+type appFakeDownloader struct {
+	files map[string][]byte
+}
+
+func newAppFakeDownloader(files map[string][]byte) *appFakeDownloader {
+	copied := map[string][]byte{}
+	for key, value := range files {
+		copied[key] = append([]byte(nil), value...)
+	}
+	return &appFakeDownloader{files: copied}
+}
+
+func (d *appFakeDownloader) FetchMetadata(_ context.Context, rawURL string, _ *download.Checksum) ([]byte, error) {
+	data, ok := d.files[rawURL]
+	if !ok {
+		return nil, &download.HTTPError{URL: rawURL, StatusCode: 404, Status: "404 Not Found"}
+	}
+	return append([]byte(nil), data...), nil
+}
+
+func (d *appFakeDownloader) DownloadPackage(_ context.Context, rawURL, destination string, _ *download.Checksum) error {
+	data, ok := d.files[rawURL]
+	if !ok {
+		return &download.HTTPError{URL: rawURL, StatusCode: 404, Status: "404 Not Found"}
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(destination, data, 0644)
+}
+
+func (d *appFakeDownloader) GetLength(_ context.Context, rawURL string) (int64, error) {
+	data, ok := d.files[rawURL]
+	if !ok {
+		return 0, &download.HTTPError{URL: rawURL, StatusCode: 404, Status: "404 Not Found"}
+	}
+	return int64(len(data)), nil
+}
+
+type appDiskSpaceChecker struct {
+	available int64
+	err       error
+}
+
+func (c appDiskSpaceChecker) AvailableBytes(string) (int64, error) {
+	return c.available, c.err
 }
 
 func isolateAppConfig(t *testing.T) {

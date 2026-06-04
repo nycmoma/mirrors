@@ -338,6 +338,16 @@ func (s *Store) Stats() (Stats, error) {
 	if err := s.db.QueryRow(`
 SELECT COALESCE(SUM(size), 0)
 FROM (
+	SELECT MAX(size) AS size
+	FROM packages
+	GROUP BY CASE WHEN pool_path = '' THEN package_key ELSE pool_path END
+)
+`).Scan(&stats.KnownPackageSizeBytes); err != nil {
+		return Stats{}, err
+	}
+	if err := s.db.QueryRow(`
+SELECT COALESCE(SUM(size), 0)
+FROM (
 	SELECT MAX(p.size) AS size
 	FROM mirror_packages mp
 	JOIN packages p ON p.package_key = mp.package_key

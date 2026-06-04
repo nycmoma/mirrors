@@ -1,6 +1,8 @@
 package snapshot
 
 import (
+	"database/sql"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -139,12 +141,8 @@ func TestRollbackByDateSelectsMergedSnapshotWhenMergeEnabled(t *testing.T) {
 	if result.SelectedSnapshot != mergedName {
 		t.Fatalf("expected merged snapshot selection, got %#v", result)
 	}
-	published, err := store.Published()
-	if err != nil {
-		t.Fatalf("Published returned error: %v", err)
-	}
-	if published.SnapshotName != mergedName {
-		t.Fatalf("selected snapshot was not persisted: %#v", published)
+	if _, err := store.Published(); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("rollback selection should not persist published state, got error: %v", err)
 	}
 }
 

@@ -2,6 +2,8 @@ package publish
 
 import (
 	"compress/gzip"
+	"database/sql"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -130,6 +132,34 @@ func TestHideRemovesPublishedOutputAndPreservesState(t *testing.T) {
 	}
 	if !published.Hidden {
 		t.Fatalf("published state should be hidden: %#v", published)
+	}
+}
+
+func TestHideWithoutPublishedStateDoesNotCreateInvalidHiddenRecord(t *testing.T) {
+	home := t.TempDir()
+	cfg := testConfig()
+	store, err := state.Open(config.DBPathForHome(home, cfg.Name))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	service := newTestService(t, home)
+	if _, err := service.Hide(cfg.Name); err != nil {
+		t.Fatalf("Hide returned error: %v", err)
+	}
+	store, err = state.Open(config.DBPathForHome(home, cfg.Name))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.Published(); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("hide without prior published state should not create a hidden record, got err=%v", err)
 	}
 }
 

@@ -112,6 +112,8 @@ type Summary struct {
 }
 
 // CreateCurrent creates or regenerates today's regular and merged snapshots.
+// It selects the snapshot that should be published, but does not switch
+// published state. The app workflow commits published state after publish/sign.
 func (s *Service) CreateCurrent(cfg config.Mirror) (UpdateResult, error) {
 	if err := config.Validate(cfg); err != nil {
 		return UpdateResult{}, err
@@ -185,30 +187,13 @@ func (s *Service) CreateCurrent(cfg config.Mirror) (UpdateResult, error) {
 	if selected == "" {
 		return UpdateResult{}, fmt.Errorf("no snapshot targets resolved for mirror %q", cfg.Name)
 	}
-	if err := store.SetPublished(state.PublishedRecord{
-		SnapshotName: selected,
-		Path:         cfg.Path,
-		Suite:        firstSuite(cfg),
-		Component:    firstComponent(cfg),
-		PublishedAt:  now,
-	}); err != nil {
-		return UpdateResult{}, err
-	}
-	if _, err := store.RecordUpdateHistory(state.UpdateRecord{
-		Action:     "update",
-		Status:     "ok",
-		Message:    fmt.Sprintf("selected snapshot %s", selected),
-		StartedAt:  now,
-		FinishedAt: s.now(),
-	}); err != nil {
-		return UpdateResult{}, err
-	}
-
 	result.SelectedSnapshot = selected
 	return result, nil
 }
 
-// Rollback switches selected snapshot state by date or snapshot ID/name.
+// Rollback resolves a rollback target by date or snapshot ID/name.
+// It does not switch published state. The app workflow commits published state
+// after the target snapshot is published and signed.
 func (s *Service) Rollback(mirrorName, date, id string) (RollbackResult, error) {
 	if strings.TrimSpace(mirrorName) == "" {
 		return RollbackResult{}, fmt.Errorf("mirror name is required")
@@ -233,25 +218,6 @@ func (s *Service) Rollback(mirrorName, date, id string) (RollbackResult, error) 
 		return RollbackResult{}, err
 	}
 	selected := targets[len(targets)-1]
-	now := s.now()
-	if err := store.SetPublished(state.PublishedRecord{
-		SnapshotName: selected,
-		Path:         cfg.Path,
-		Suite:        firstSuite(cfg),
-		Component:    firstComponent(cfg),
-		PublishedAt:  now,
-	}); err != nil {
-		return RollbackResult{}, err
-	}
-	if _, err := store.RecordUpdateHistory(state.UpdateRecord{
-		Action:     "rollback",
-		Status:     "ok",
-		Message:    fmt.Sprintf("selected snapshot %s", selected),
-		StartedAt:  now,
-		FinishedAt: now,
-	}); err != nil {
-		return RollbackResult{}, err
-	}
 
 	return RollbackResult{
 		MirrorName:        cfg.Name,
