@@ -49,6 +49,39 @@ func TestParseCreateConfig(t *testing.T) {
 	}
 }
 
+func TestParseUpdateName(t *testing.T) {
+	cmd, err := Parse([]string{"update", "-n", "ubuntu"})
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cmd.Name != "update" || cmd.NameRef != "ubuntu" {
+		t.Fatalf("unexpected command: %#v", cmd)
+	}
+}
+
+func TestParsePeriodicCommandsRejectIdentityFlags(t *testing.T) {
+	for _, command := range []string{"daily", "weekly", "monthly"} {
+		if _, err := Parse([]string{command, "-n", "ubuntu"}); err == nil {
+			t.Fatalf("expected %s -n to be rejected", command)
+		}
+		if _, err := Parse([]string{command, "-c", "mirror.conf"}); err == nil {
+			t.Fatalf("expected %s -c to be rejected", command)
+		}
+	}
+}
+
+func TestParsePeriodicCommandsAcceptNoArgs(t *testing.T) {
+	for _, command := range []string{"daily", "weekly", "monthly"} {
+		cmd, err := Parse([]string{command})
+		if err != nil {
+			t.Fatalf("Parse(%s) returned error: %v", command, err)
+		}
+		if cmd.Name != command {
+			t.Fatalf("unexpected command: %#v", cmd)
+		}
+	}
+}
+
 func TestParseCleanupDays(t *testing.T) {
 	cmd, err := Parse([]string{"cleanup", "-n", "ubuntu-xenial", "--days", "30"})
 	if err != nil {
@@ -80,6 +113,28 @@ func TestParseCleanupRejectsAmbiguousMode(t *testing.T) {
 	_, err := Parse([]string{"cleanup", "-n", "ubuntu-xenial", "--days", "30", "--all"})
 	if err == nil {
 		t.Fatal("expected ambiguous cleanup mode to be rejected")
+	}
+}
+
+// TestParsePeriodicCommandsRejectCleanupDaysFlag covers the Phase 16 contract:
+// periodic commands accept no flags, including cleanup-specific flags.
+func TestParsePeriodicCommandsRejectCleanupDaysFlag(t *testing.T) {
+	for _, command := range []string{"daily", "weekly", "monthly"} {
+		_, err := Parse([]string{command, "--days", "7"})
+		if err == nil {
+			t.Errorf("%s --days 7 was accepted; want rejection", command)
+		}
+	}
+}
+
+// TestParsePeriodicCommandsRejectCleanupAllFlag covers the Phase 16 contract:
+// periodic commands accept no flags, including cleanup-specific flags.
+func TestParsePeriodicCommandsRejectCleanupAllFlag(t *testing.T) {
+	for _, command := range []string{"daily", "weekly", "monthly"} {
+		_, err := Parse([]string{command, "--all"})
+		if err == nil {
+			t.Errorf("%s --all was accepted; want rejection", command)
+		}
 	}
 }
 

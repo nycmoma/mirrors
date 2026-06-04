@@ -50,8 +50,8 @@ func (tx *Tx) SaveMirrorConfig(cfg config.Mirror) error {
 INSERT INTO mirror (
 	name, url, dist, release, origin, label, arch, components, path, merge,
 	server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file,
-	config_path
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	config_path, update_policy
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 		cfg.Name,
 		cfg.URL,
@@ -70,6 +70,7 @@ INSERT INTO mirror (
 		cfg.Signing.GPGPassphrase,
 		cfg.Signing.GPGPassphraseFile,
 		cfg.ConfigPath,
+		cfg.UpdatePolicy,
 	)
 	return err
 }
@@ -79,7 +80,7 @@ func (s *Store) MirrorConfig() (config.Mirror, error) {
 	return scanMirrorConfig(s.db.QueryRow(`
 SELECT name, url, dist, release, origin, label, arch, components, path, merge,
        server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file,
-       config_path
+       config_path, update_policy
 FROM mirror
 LIMIT 1
 `))
@@ -90,7 +91,7 @@ func (tx *Tx) MirrorConfig() (config.Mirror, error) {
 	return scanMirrorConfig(tx.tx.QueryRow(`
 SELECT name, url, dist, release, origin, label, arch, components, path, merge,
        server, sign, gpg_home, gpg_key, gpg_passphrase, gpg_passphrase_file,
-       config_path
+       config_path, update_policy
 FROM mirror
 LIMIT 1
 `))
@@ -103,6 +104,7 @@ func scanMirrorConfig(row interface {
 	var mergeValue string
 	var signValue string
 	var configPath string
+	var updatePolicy string
 	err := row.Scan(
 		&values.Name,
 		&values.URL,
@@ -121,6 +123,7 @@ func scanMirrorConfig(row interface {
 		&values.GPGPassphrase,
 		&values.GPGPassphraseFile,
 		&configPath,
+		&updatePolicy,
 	)
 	if err != nil {
 		return config.Mirror{}, err
@@ -136,6 +139,7 @@ func scanMirrorConfig(row interface {
 		return config.Mirror{}, err
 	}
 	values.Signing = signing
+	values.UpdatePolicy = updatePolicy
 
 	cfg := config.FromValues(values)
 	cfg.ConfigPath = configPath

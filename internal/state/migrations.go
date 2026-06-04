@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const latestSchemaVersion = 4
+const latestSchemaVersion = 5
 
 type migration struct {
 	version int
@@ -143,6 +143,12 @@ ALTER TABLE mirror ADD COLUMN gpg_passphrase_file TEXT NOT NULL DEFAULT '';
 		version: 4,
 		sql: `
 ALTER TABLE mirror ADD COLUMN config_path TEXT NOT NULL DEFAULT '';
+`,
+	},
+	{
+		version: 5,
+		sql: `
+ALTER TABLE mirror ADD COLUMN update_policy TEXT NOT NULL DEFAULT '';
 `,
 	},
 }

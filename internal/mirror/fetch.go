@@ -203,7 +203,7 @@ func (s *Service) buildFetchPlan(ctx context.Context, cfg config.Mirror, package
 	}
 	plan.summary.AvailableBytes = available
 	if plan.summary.EstimatedDownloadBytes > available {
-		return fetchPlan{}, fmt.Errorf("not enough disk space in package pool %q: need %d bytes, available %d bytes", packagePool.Root(), plan.summary.EstimatedDownloadBytes, available)
+		return fetchPlan{}, fmt.Errorf("%w in package pool %q: need %d bytes, available %d bytes", ErrInsufficientDiskSpace, packagePool.Root(), plan.summary.EstimatedDownloadBytes, available)
 	}
 	plan.summary.Warnings = plan.summary.WarningsWithUnknownSize()
 	return plan, nil

@@ -11,10 +11,11 @@ publishing repository files, and signing releases.
 Completed through:
 
 ```text
-Phase 15: Logging
+Phase 16: Mirror Update Policy
 ```
 
-Phase 16 mirror update policy work is next.
+Phase 17 workflow consistency and state ordering work is planned but not
+started.
 
 Implemented packages and behavior:
 
@@ -99,7 +100,8 @@ Implemented packages and behavior:
   - optional file-backed diagnostic logging
   - download estimate output for package-consuming workflows
   - interactive package download progress bar with line-based log fallback
-  - `daily`, `weekly`, and `monthly` update workflow aliases
+  - `daily`, `weekly`, and `monthly` batch update commands for CI/CD or
+    manual scheduling
   - cleanup summary reporting for snapshots and unreferenced package pool files
   - cleanup retention with `--days` or `--all`
   - published snapshot preservation during cleanup
@@ -152,10 +154,10 @@ mirror config show -c|--config <config_file>
 mirror config show -n|--name <mirror_name>
 mirror create -c|--config <config_file>
 mirror fetch -c|--config <config_file>
-mirror update -c|--config <config_file>
-mirror daily [-n|--name <mirror_name> | -c|--config <config_file>]
-mirror weekly [-n|--name <mirror_name> | -c|--config <config_file>]
-mirror monthly [-n|--name <mirror_name> | -c|--config <config_file>]
+mirror update [-n|--name <mirror_name> | -c|--config <config_file>]
+mirror daily
+mirror weekly
+mirror monthly
 mirror rollback [-n|--name <mirror_name> | -c|--config <config_file>] [-d|--date YYYY-MM-DD | -i|--id <snapshot_id>]
 mirror hide [-n|--name <mirror_name> | -c|--config <config_file>]
 mirror cleanup [-n|--name <mirror_name> | -c|--config <config_file>] [--days <days> | --all]
@@ -189,6 +191,22 @@ Signing can be disabled per mirror with `sign = no`. When signing is enabled,
 in `[mirror]`; otherwise `GPG_KEY` and `GPG_PASSPHRASE` are used when present,
 with `gpg` default key behavior as the final fallback.
 
+Scheduled automation can set per-mirror update intent with:
+
+```text
+update = daily|weekly|monthly|never
+```
+
+Empty or missing `update` means no schedule policy is configured. `never`
+allows mirror creation but blocks `update`, `daily`, `weekly`, and `monthly`.
+`daily` and `weekly` use one-day and seven-day currently published snapshot age
+gates. `monthly` uses a calendar-month gate, not a fixed 30-day duration.
+
+`mirror daily`, `mirror weekly`, and `mirror monthly` take no mirror identity
+flags. They enumerate created DB mirrors, refresh each stored config file into
+the DB, skip unpublished or not-due mirrors with terminal and info-log reasons,
+and update only mirrors whose refreshed policy matches the command.
+
 ## Usage Examples
 
 ```bash
@@ -199,7 +217,8 @@ mirror config show -c ./chrome_stable.conf
 mirror config show -n chrome_stable
 mirror fetch -c ./chrome_stable.conf
 mirror update -c ./chrome_stable.conf
-mirror daily -n chrome_stable
+mirror update -n chrome_stable
+mirror daily
 mirror rollback -n chrome_stable -d 2026-05-27
 mirror hide -n chrome_stable
 mirror cleanup -n chrome_stable

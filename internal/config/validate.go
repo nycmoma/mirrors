@@ -39,5 +39,8 @@ func Validate(cfg Mirror) error {
 	if strings.Contains(cfg.Path, "..") {
 		return fmt.Errorf("invalid mirror path %q: path must not contain '..'", cfg.Path)
 	}
+	if _, err := ParseUpdatePolicy(cfg.UpdatePolicy); err != nil {
+		return err
+	}
 	return nil
 }

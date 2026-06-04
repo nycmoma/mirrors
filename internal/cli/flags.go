@@ -146,7 +146,15 @@ func validate(cmd Command) error {
 	switch cmd.Name {
 	case "config":
 		return validateConfigCommand(cmd)
-	case "create", "fetch", "update", "rollback", "daily", "weekly", "monthly", "hide", "destroy", "list", "info", "more-info":
+	case "daily", "weekly", "monthly":
+		if cmd.ConfigPath != "" || cmd.NameRef != "" {
+			return fmt.Errorf("%s does not accept --config or --name; it updates all due published mirrors with update = %s", cmd.Name, cmd.Name)
+		}
+		if cmd.URL != "" || cmd.Date != "" || cmd.ID != "" || cmd.Snapshot != "" || cmd.CleanupDaysSet || cmd.CleanupAll {
+			return fmt.Errorf("%s does not accept flags", cmd.Name)
+		}
+		return nil
+	case "create", "fetch", "update", "rollback", "hide", "destroy", "list", "info", "more-info":
 		return nil
 	case "cleanup":
 		if cmd.CleanupDaysSet && cmd.CleanupAll {

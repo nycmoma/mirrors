@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,6 +34,65 @@ server = http://mirror.example.test/
 	}
 	if !cfg.Merge.Enabled || cfg.Merge.Depth != 3 {
 		t.Fatalf("unexpected merge: %#v", cfg.Merge)
+	}
+}
+
+func TestLoadUpdatePolicies(t *testing.T) {
+	for _, policy := range []string{"", "daily", "weekly", "monthly", "never"} {
+		path := writeTempConfig(t, `[mirror]
+name = ubuntu-xenial
+url = http://archive.ubuntu.com/ubuntu/
+dist = xenial
+release = default
+arch = amd64
+components = main
+path = ubuntu
+update = `+policy+`
+`)
+
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%q) returned error: %v", policy, err)
+		}
+		if cfg.UpdatePolicy != policy {
+			t.Fatalf("unexpected update policy: got %q want %q", cfg.UpdatePolicy, policy)
+		}
+	}
+}
+
+func TestMirrorStringRendersUpdatePolicy(t *testing.T) {
+	cfg := Mirror{
+		Name:         "ubuntu-xenial",
+		URL:          "http://archive.ubuntu.com/ubuntu/",
+		Dists:        []string{"xenial"},
+		Releases:     []string{"default"},
+		Origin:       "default",
+		Label:        "default",
+		Arch:         []string{"amd64"},
+		Components:   []string{"main"},
+		Path:         "ubuntu",
+		UpdatePolicy: "weekly",
+	}
+
+	if got := cfg.String(); !strings.Contains(got, "update = weekly") {
+		t.Fatalf("rendered config missing update policy:\n%s", got)
+	}
+}
+
+func TestLoadRejectsInvalidUpdatePolicy(t *testing.T) {
+	path := writeTempConfig(t, `[mirror]
+name = ubuntu-xenial
+url = http://archive.ubuntu.com/ubuntu/
+dist = xenial
+release = default
+arch = amd64
+components = main
+path = ubuntu
+update = hourly
+`)
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected invalid update policy error")
 	}
 }
 
@@ -231,6 +291,9 @@ server = http://mirror.example.test/
 	if cfg.Merge.Enabled {
 		t.Fatalf("expected merge disabled by default, got %#v", cfg.Merge)
 	}
+	if cfg.UpdatePolicy != "weekly" {
+		t.Fatalf("unexpected update policy: %q", cfg.UpdatePolicy)
+	}
 }
 
 func TestValidateRejectsMissingURL(t *testing.T) {
@@ -244,6 +307,22 @@ func TestValidateRejectsMissingURL(t *testing.T) {
 	}
 	if err := Validate(cfg); err == nil {
 		t.Fatal("expected missing URL validation error")
+	}
+}
+
+func TestValidateRejectsInvalidUpdatePolicy(t *testing.T) {
+	cfg := Mirror{
+		Name:         "ubuntu-xenial",
+		URL:          "http://archive.ubuntu.com/ubuntu/",
+		Dists:        []string{"xenial"},
+		Releases:     []string{"default"},
+		Arch:         []string{"amd64"},
+		Components:   []string{"main"},
+		Path:         "ubuntu",
+		UpdatePolicy: "hourly",
+	}
+	if err := Validate(cfg); err == nil {
+		t.Fatal("expected invalid update policy validation error")
 	}
 }
 

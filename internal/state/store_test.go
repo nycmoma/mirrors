@@ -93,6 +93,9 @@ func TestSaveAndLoadMirrorConfig(t *testing.T) {
 	if loaded.Path != "updated" || loaded.Merge.Depth != 2 {
 		t.Fatalf("config update was not persisted: %#v", loaded)
 	}
+	if loaded.UpdatePolicy != "weekly" {
+		t.Fatalf("update policy was not persisted: %#v", loaded)
+	}
 	if loaded.ConfigPath != "/etc/mirrors/ubuntu.conf" {
 		t.Fatalf("config path was not persisted: %#v", loaded)
 	}
@@ -117,6 +120,9 @@ func TestLoadMirrorConfigKeepsPhase2ReaderCompatibility(t *testing.T) {
 	}
 	if !cfg.Merge.Enabled || cfg.Merge.Depth != 2 {
 		t.Fatalf("unexpected merge: %#v", cfg.Merge)
+	}
+	if cfg.UpdatePolicy != "" {
+		t.Fatalf("expected empty migrated update policy, got %q", cfg.UpdatePolicy)
 	}
 }
 
@@ -476,17 +482,18 @@ func upsertTestPackage(t *testing.T, store *Store, pkg PackageRecord) string {
 
 func testConfig() config.Mirror {
 	return config.Mirror{
-		Name:       "ubuntu",
-		URL:        "http://us.archive.ubuntu.com/ubuntu/",
-		Dists:      []string{"focal", "jammy"},
-		Releases:   []string{"default", "updates"},
-		Origin:     "Ubuntu",
-		Label:      "Ubuntu",
-		Arch:       []string{"amd64"},
-		Components: []string{"main", "restricted"},
-		Path:       "preprod",
-		Merge:      config.Merge{Enabled: true},
-		Server:     "http://mirror.example.test",
+		Name:         "ubuntu",
+		URL:          "http://us.archive.ubuntu.com/ubuntu/",
+		Dists:        []string{"focal", "jammy"},
+		Releases:     []string{"default", "updates"},
+		Origin:       "Ubuntu",
+		Label:        "Ubuntu",
+		Arch:         []string{"amd64"},
+		Components:   []string{"main", "restricted"},
+		Path:         "preprod",
+		Merge:        config.Merge{Enabled: true},
+		UpdatePolicy: "weekly",
+		Server:       "http://mirror.example.test",
 		Signing: config.Signing{
 			GPGHome:           "/tmp/gnupg",
 			GPGKey:            "560CE107BECFB86BF8BED1DBD9FEEBA651DA48E7",

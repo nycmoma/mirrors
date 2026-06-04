@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"mirrors/internal/appconfig"
@@ -29,6 +30,9 @@ var generateConfig = func(ctx context.Context, rawURL string, downloader downloa
 }
 var validateConfig = validateConfigWorkflowWithLogger
 var loadAppConfig = appconfig.Load
+var runUpdateWorkflow = runPublishUpdateWithLogger
+var refreshMirrorConfigForPeriodic = refreshMirrorConfigByName
+var loadPublishedForPeriodic = loadPublishedWithConfig
 
 // Run is the top-level application entrypoint used by main.
 func Run(args []string) error {
@@ -72,8 +76,10 @@ func dispatchWithLogger(cmd cli.Command, appCfg appconfig.Config, logger logging
 	switch cmd.Name {
 	case "config":
 		return runConfigWithConfigAndLogger(cmd, appCfg, logger)
-	case "create", "fetch", "update":
+	case "create", "fetch":
 		return runConfigDrivenMirrorCommandWithLogger(cmd, appCfg, logger)
+	case "update":
+		return runUpdateCommandWithLogger(cmd, appCfg, logger)
 	case "rollback", "daily", "weekly", "monthly", "hide", "destroy", "cleanup", "info", "more-info":
 		return runMirrorCommandWithConfigAndLogger(cmd, appCfg, logger)
 	case "list":
@@ -173,7 +179,7 @@ func runConfigDrivenMirrorCommandWithLogger(cmd cli.Command, appCfg appconfig.Co
 
 	switch cmd.Name {
 	case "create":
-		return runPublishUpdateWithLogger("Create", service, appCfg, cfg, logger)
+		return runUpdateWorkflow("Create", service, appCfg, cfg, logger)
 	case "fetch":
 		result, err := service.Fetch(context.Background(), cfg)
 		if err != nil {
@@ -181,11 +187,24 @@ func runConfigDrivenMirrorCommandWithLogger(cmd cli.Command, appCfg appconfig.Co
 		}
 		printFetchResult("Fetch", result)
 		return nil
-	case "update":
-		return runPublishUpdateWithLogger("Update", service, appCfg, cfg, logger)
 	default:
 		return notImplemented(cmd.Name)
 	}
+}
+
+func runUpdateCommandWithLogger(cmd cli.Command, appCfg appconfig.Config, logger logging.Logger) error {
+	cfg, err := refreshedUpdateConfig(cmd, appCfg, logger)
+	if err != nil {
+		return err
+	}
+	if cfg.UpdatePolicy == "never" {
+		return updateDisabledError(cfg.Name)
+	}
+	service, err := newMirrorServiceWithLogger(appCfg, logger)
+	if err != nil {
+		return err
+	}
+	return runUpdateWorkflow("Update", service, appCfg, cfg, logger)
 }
 
 func runPublishUpdate(action string, mirrorService *mirror.Service, appCfg appconfig.Config, cfg config.Mirror) error {
@@ -237,6 +256,9 @@ func runMirrorCommandWithConfig(cmd cli.Command, appCfg appconfig.Config) error 
 }
 
 func runMirrorCommandWithConfigAndLogger(cmd cli.Command, appCfg appconfig.Config, logger logging.Logger) error {
+	if cmd.Name == "daily" || cmd.Name == "weekly" || cmd.Name == "monthly" {
+		return runPeriodicBatchCommandWithLogger(cmd.Name, appCfg, logger)
+	}
 	if err := validateMirrorIdentity(cmd); err != nil {
 		return err
 	}
@@ -249,20 +271,6 @@ func runMirrorCommandWithConfigAndLogger(cmd cli.Command, appCfg appconfig.Confi
 		return err
 	}
 	switch cmd.Name {
-	case "daily", "weekly", "monthly":
-		cfg, err := configForMirrorCommand(cmd, appCfg, name)
-		if err != nil {
-			return err
-		}
-		shouldRun, message, err := periodicShouldRunWithConfig(name, cmd.Name, appCfg)
-		if err != nil {
-			return err
-		}
-		if !shouldRun {
-			fmt.Println(message)
-			return nil
-		}
-		return runPublishUpdateWithLogger(title(cmd.Name), service, appCfg, cfg, logger)
 	case "rollback":
 		snapshotService, err := snapshot.NewService(snapshot.WithDBDir(appCfg.DBDir()))
 		if err != nil {
@@ -457,6 +465,91 @@ func configForMirrorCommand(cmd cli.Command, appCfg appconfig.Config, name strin
 	return state.LoadMirrorConfig(appCfg.DBPath(name))
 }
 
+func refreshedUpdateConfig(cmd cli.Command, appCfg appconfig.Config, logger logging.Logger) (config.Mirror, error) {
+	if cmd.ConfigPath != "" && cmd.NameRef != "" {
+		return config.Mirror{}, fmt.Errorf("ambiguous mirror identity: provide either --config or --name, not both")
+	}
+	if cmd.ConfigPath == "" && cmd.NameRef == "" {
+		return config.Mirror{}, fmt.Errorf("missing mirror identity. Use --config <config_file> or --name <mirror_name>")
+	}
+	if cmd.URL != "" {
+		return config.Mirror{}, fmt.Errorf("update does not accept --URL; use --config or --name")
+	}
+	if cmd.ConfigPath != "" {
+		cfg, err := config.Load(cmd.ConfigPath)
+		if err != nil {
+			return config.Mirror{}, err
+		}
+		if err := config.Validate(cfg); err != nil {
+			return config.Mirror{}, err
+		}
+		if err := saveMirrorConfigWithConfig(cfg, appCfg); err != nil {
+			return config.Mirror{}, err
+		}
+		logger.Infof("config refreshed mirror=%q config_path=%q source=command", cfg.Name, cfg.ConfigPath)
+		return state.LoadMirrorConfig(appCfg.DBPath(cfg.Name))
+	}
+	return refreshMirrorConfigByName(cmd.NameRef, appCfg, logger)
+}
+
+func refreshMirrorConfigByName(name string, appCfg appconfig.Config, logger logging.Logger) (config.Mirror, error) {
+	store, err := state.Open(appCfg.DBPath(name))
+	if err != nil {
+		return config.Mirror{}, err
+	}
+	stored, err := store.MirrorConfig()
+	if err != nil {
+		_ = store.Close()
+		return config.Mirror{}, err
+	}
+	if strings.TrimSpace(stored.ConfigPath) == "" {
+		_ = store.Close()
+		return config.Mirror{}, fmt.Errorf("mirror %q has no stored config path; recreate it with --config before DB-backed workflows can refresh it", name)
+	}
+	refreshed, err := config.Load(stored.ConfigPath)
+	if err != nil {
+		_ = store.Close()
+		return config.Mirror{}, fmt.Errorf("refresh mirror %q config %q: %w", name, stored.ConfigPath, err)
+	}
+	if err := config.Validate(refreshed); err != nil {
+		_ = store.Close()
+		return config.Mirror{}, fmt.Errorf("refresh mirror %q config %q: %w", name, stored.ConfigPath, err)
+	}
+	if refreshed.Name != name {
+		_ = store.Close()
+		return config.Mirror{}, fmt.Errorf("refresh mirror %q config %q: config name changed to %q", name, stored.ConfigPath, refreshed.Name)
+	}
+	if err := store.SaveMirrorConfig(refreshed); err != nil {
+		_ = store.Close()
+		return config.Mirror{}, err
+	}
+	cfg, err := store.MirrorConfig()
+	closeErr := store.Close()
+	if err != nil {
+		return config.Mirror{}, err
+	}
+	if closeErr != nil {
+		return config.Mirror{}, closeErr
+	}
+	logger.Infof("config refreshed mirror=%q config_path=%q source=db", cfg.Name, cfg.ConfigPath)
+	return cfg, nil
+}
+
+func saveMirrorConfigWithConfig(cfg config.Mirror, appCfg appconfig.Config) error {
+	store, err := state.Open(appCfg.DBPath(cfg.Name))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = store.Close()
+	}()
+	return store.SaveMirrorConfig(cfg)
+}
+
+func updateDisabledError(name string) error {
+	return fmt.Errorf("update skipped for mirror %q: update policy is never; remove or change update = never in the config file to allow updates", name)
+}
+
 func validateConfigWorkflow(ctx context.Context, appCfg appconfig.Config, cfg config.Mirror) ([]config.UpstreamRelease, error) {
 	return validateConfigWorkflowWithLogger(ctx, appCfg, cfg, logging.Nop())
 }
@@ -547,28 +640,22 @@ func periodicShouldRun(name, command string) (bool, string, error) {
 }
 
 func periodicShouldRunWithConfig(name, command string, appCfg appconfig.Config) (bool, string, error) {
-	thresholds := map[string]int{
-		"daily":   1,
-		"weekly":  7,
-		"monthly": 30,
-	}
-	threshold, ok := thresholds[command]
-	if !ok {
-		return true, "", nil
-	}
-	store, err := state.Open(appCfg.DBPath(name))
-	if err != nil {
-		return false, "", err
-	}
-	defer func() {
-		_ = store.Close()
-	}()
-	published, err := store.Published()
+	published, err := loadPublishedWithConfig(name, appCfg)
 	if errors.Is(err, sql.ErrNoRows) {
 		return true, "", nil
 	}
 	if err != nil {
 		return false, "", err
+	}
+	if published.Hidden {
+		return true, "", nil
+	}
+	return periodicShouldRunForPublished(name, command, published, time.Now())
+}
+
+func periodicShouldRunForPublished(name, command string, published state.PublishedRecord, now time.Time) (bool, string, error) {
+	if command != "daily" && command != "weekly" && command != "monthly" {
+		return true, "", nil
 	}
 	date := snapshotDate(published.SnapshotName)
 	if date == "" {
@@ -578,12 +665,181 @@ func periodicShouldRunWithConfig(name, command string, appCfg appconfig.Config) 
 	if err != nil {
 		return true, "", nil
 	}
-	today, _ := time.Parse("2006-01-02", time.Now().Local().Format("2006-01-02"))
+	today := localDate(now)
+	if command == "monthly" {
+		dueDate := nextCalendarMonthDate(publishedDate)
+		if today.Before(dueDate) {
+			return false, fmt.Sprintf("Monthly skipped for mirror %q: published snapshot %s is not at least one calendar month old, due on %s", name, published.SnapshotName, dueDate.Format("2006-01-02")), nil
+		}
+		return true, "", nil
+	}
+
+	thresholds := map[string]int{
+		"daily":  1,
+		"weekly": 7,
+	}
+	threshold := thresholds[command]
 	ageDays := int(today.Sub(publishedDate).Hours() / 24)
 	if ageDays < threshold {
 		return false, fmt.Sprintf("%s skipped for mirror %q: published snapshot %s is %d day(s) old, threshold is %d day(s)", title(command), name, published.SnapshotName, ageDays, threshold), nil
 	}
 	return true, "", nil
+}
+
+func localDate(now time.Time) time.Time {
+	parsed, _ := time.Parse("2006-01-02", now.Local().Format("2006-01-02"))
+	return parsed
+}
+
+func nextCalendarMonthDate(date time.Time) time.Time {
+	year, month, day := date.Date()
+	month++
+	if month > 12 {
+		month = 1
+		year++
+	}
+	maxDay := daysInMonth(year, month)
+	if day > maxDay {
+		day = maxDay
+	}
+	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+}
+
+func daysInMonth(year int, month time.Month) int {
+	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+}
+
+func runPeriodicBatchCommandWithLogger(command string, appCfg appconfig.Config, logger logging.Logger) error {
+	service, err := newMirrorServiceWithLogger(appCfg, logger)
+	if err != nil {
+		return err
+	}
+	names, err := periodicMirrorNames(appCfg.DBDir())
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		message := fmt.Sprintf("%s skipped: no mirrors found", title(command))
+		reportPeriodicSkip(logger, message)
+		return nil
+	}
+
+	failures := 0
+	for _, name := range names {
+		cfg, err := refreshMirrorConfigForPeriodic(name, appCfg, logger)
+		if err != nil {
+			reportPeriodicFailure(logger, command, name, err)
+			if isBatchFatalDiskError(err) {
+				return err
+			}
+			failures++
+			continue
+		}
+
+		published, err := loadPublishedForPeriodic(name, appCfg)
+		if errors.Is(err, sql.ErrNoRows) {
+			reportPeriodicSkip(logger, fmt.Sprintf("%s skipped for mirror %q: mirror is not published", title(command), name))
+			continue
+		}
+		if err != nil {
+			reportPeriodicFailure(logger, command, name, err)
+			if isBatchFatalDiskError(err) {
+				return err
+			}
+			failures++
+			continue
+		}
+		if published.Hidden {
+			reportPeriodicSkip(logger, fmt.Sprintf("%s skipped for mirror %q: mirror is hidden/unpublished", title(command), name))
+			continue
+		}
+
+		if cfg.UpdatePolicy == "" {
+			reportPeriodicSkip(logger, fmt.Sprintf("%s skipped for mirror %q: no update policy configured", title(command), name))
+			continue
+		}
+		if cfg.UpdatePolicy == "never" {
+			reportPeriodicSkip(logger, fmt.Sprintf("%s skipped for mirror %q: update policy is never", title(command), name))
+			continue
+		}
+		if cfg.UpdatePolicy != command {
+			reportPeriodicSkip(logger, fmt.Sprintf("%s skipped for mirror %q: update policy is %s", title(command), name, cfg.UpdatePolicy))
+			continue
+		}
+
+		shouldRun, message, err := periodicShouldRunForPublished(name, command, published, time.Now())
+		if err != nil {
+			failures++
+			reportPeriodicFailure(logger, command, name, err)
+			continue
+		}
+		if !shouldRun {
+			reportPeriodicSkip(logger, message)
+			continue
+		}
+
+		if err := runUpdateWorkflow(title(command), service, appCfg, cfg, logger); err != nil {
+			reportPeriodicFailure(logger, command, name, err)
+			if isBatchFatalDiskError(err) {
+				return err
+			}
+			failures++
+			continue
+		}
+	}
+	if failures > 0 {
+		return fmt.Errorf("%s completed with %d mirror failure(s)", command, failures)
+	}
+	return nil
+}
+
+func periodicMirrorNames(dbDir string) ([]string, error) {
+	entries, err := os.ReadDir(dbDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".sqlite" {
+			continue
+		}
+		names = append(names, strings.TrimSuffix(entry.Name(), ".sqlite"))
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func loadPublishedWithConfig(name string, appCfg appconfig.Config) (state.PublishedRecord, error) {
+	store, err := state.Open(appCfg.DBPath(name))
+	if err != nil {
+		return state.PublishedRecord{}, err
+	}
+	defer func() {
+		_ = store.Close()
+	}()
+	return store.Published()
+}
+
+func reportPeriodicSkip(logger logging.Logger, message string) {
+	fmt.Println(message)
+	logger.Infof("%s", message)
+}
+
+func reportPeriodicFailure(logger logging.Logger, command, name string, err error) {
+	message := fmt.Sprintf("%s failed for mirror %q: %v", title(command), name, err)
+	fmt.Println(message)
+	logger.Errorf("%s", message)
+}
+
+func isBatchFatalDiskError(err error) bool {
+	if errors.Is(err, mirror.ErrInsufficientDiskSpace) || errors.Is(err, syscall.ENOSPC) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "no space left on device") || strings.Contains(text, "not enough disk space")
 }
 
 func runInfo(cmd cli.Command, service *mirror.Service, appCfg appconfig.Config, name string) error {

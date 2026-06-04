@@ -10,19 +10,20 @@ import (
 
 // Mirror is the normalized [mirror] configuration.
 type Mirror struct {
-	Name       string
-	ConfigPath string
-	URL        string
-	Dists      []string
-	Releases   []string
-	Origin     string
-	Label      string
-	Arch       []string
-	Components []string
-	Path       string
-	Merge      Merge
-	Server     string
-	Signing    Signing
+	Name         string
+	ConfigPath   string
+	URL          string
+	Dists        []string
+	Releases     []string
+	Origin       string
+	Label        string
+	Arch         []string
+	Components   []string
+	Path         string
+	Merge        Merge
+	UpdatePolicy string
+	Server       string
+	Signing      Signing
 }
 
 // Merge describes snapshot merge behavior.
@@ -85,6 +86,7 @@ arch = %s
 components = %s
 path = %s
 merge = %s
+update = %s
 server = %s
 sign = %s
 gpg_home = %s
@@ -101,6 +103,7 @@ gpg_passphrase_file = %s
 		strings.Join(m.Components, ", "),
 		m.Path,
 		m.Merge.String(),
+		m.UpdatePolicy,
 		m.Server,
 		signString(!m.Signing.Disabled),
 		m.Signing.GPGHome,

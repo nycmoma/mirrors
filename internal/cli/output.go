@@ -9,11 +9,11 @@ func HelpText() string {
 
   mirror create -c|--config <config_file>
   mirror fetch -c|--config <config_file>
-  mirror update -c|--config <config_file>
+  mirror update [-n|--name <mirror_name> | -c|--config <config_file>]
   mirror rollback [-n|--name <mirror_name> | -c|--config <config_file>] [-d|--date YYYY-MM-DD | -i|--id <snapshot_id>]
-  mirror daily [-n|--name <mirror_name> | -c|--config <config_file>]
-  mirror weekly [-n|--name <mirror_name> | -c|--config <config_file>]
-  mirror monthly [-n|--name <mirror_name> | -c|--config <config_file>]
+  mirror daily
+  mirror weekly
+  mirror monthly
   mirror hide [-n|--name <mirror_name> | -c|--config <config_file>]
   mirror destroy [-n|--name <mirror_name> | -c|--config <config_file>]
   mirror cleanup [-n|--name <mirror_name> | -c|--config <config_file>] [--days <days> | --all]

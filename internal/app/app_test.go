@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -475,6 +476,333 @@ func TestPeriodicShouldRunWithoutPublishedSnapshot(t *testing.T) {
 	}
 }
 
+func TestCreateAllowsUpdateNever(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	configPath := writeAppMirrorConfig(t, "ubuntu", "never")
+	var called bool
+	restore := replaceUpdateWorkflow(func(action string, _ *mirror.Service, _ appconfig.Config, cfg config.Mirror, _ logging.Logger) error {
+		called = true
+		if action != "Create" || cfg.UpdatePolicy != "never" {
+			t.Fatalf("unexpected workflow call action=%q cfg=%#v", action, cfg)
+		}
+		if err := saveMirrorConfigWithConfig(cfg, appCfg); err != nil {
+			t.Fatalf("saveMirrorConfigWithConfig returned error: %v", err)
+		}
+		return nil
+	})
+	defer restore()
+
+	if err := runConfigDrivenMirrorCommandWithLogger(cli.Command{Name: "create", ConfigPath: configPath}, appCfg, logging.Nop()); err != nil {
+		t.Fatalf("create returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("expected create workflow to run")
+	}
+	loaded, err := state.LoadMirrorConfig(appCfg.DBPath("ubuntu"))
+	if err != nil {
+		t.Fatalf("LoadMirrorConfig returned error: %v", err)
+	}
+	if loaded.UpdatePolicy != "never" {
+		t.Fatalf("expected stored never policy, got %#v", loaded)
+	}
+}
+
+func TestUpdateConfigNeverSavesThenRefuses(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	configPath := writeAppMirrorConfig(t, "ubuntu", "never")
+	restore := replaceUpdateWorkflow(func(string, *mirror.Service, appconfig.Config, config.Mirror, logging.Logger) error {
+		t.Fatal("update workflow must not run for update = never")
+		return nil
+	})
+	defer restore()
+
+	err := runUpdateCommandWithLogger(cli.Command{Name: "update", ConfigPath: configPath}, appCfg, logging.Nop())
+	if err == nil || !strings.Contains(err.Error(), "update policy is never") {
+		t.Fatalf("expected never policy error, got %v", err)
+	}
+	loaded, loadErr := state.LoadMirrorConfig(appCfg.DBPath("ubuntu"))
+	if loadErr != nil {
+		t.Fatalf("LoadMirrorConfig returned error: %v", loadErr)
+	}
+	if loaded.UpdatePolicy != "never" {
+		t.Fatalf("expected DB to be saved before refusal, got %#v", loaded)
+	}
+}
+
+func TestUpdateNameRefreshesConfigBeforePolicyDecision(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	configPath := writeAppMirrorConfig(t, "ubuntu", "")
+	store := openAppTestStore(t, home, "ubuntu")
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.ConfigPath = configPath
+	cfg.UpdatePolicy = "never"
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+	_ = store.Close()
+	var called bool
+	restore := replaceUpdateWorkflow(func(action string, _ *mirror.Service, _ appconfig.Config, cfg config.Mirror, _ logging.Logger) error {
+		called = true
+		if action != "Update" || cfg.UpdatePolicy != "" {
+			t.Fatalf("unexpected refreshed config: action=%q cfg=%#v", action, cfg)
+		}
+		return nil
+	})
+	defer restore()
+
+	if err := runUpdateCommandWithLogger(cli.Command{Name: "update", NameRef: "ubuntu"}, appCfg, logging.Nop()); err != nil {
+		t.Fatalf("update returned error after removing never: %v", err)
+	}
+	if !called {
+		t.Fatal("expected update workflow to run after refreshed config removed never")
+	}
+	loaded, err := state.LoadMirrorConfig(appCfg.DBPath("ubuntu"))
+	if err != nil {
+		t.Fatalf("LoadMirrorConfig returned error: %v", err)
+	}
+	if loaded.UpdatePolicy != "" {
+		t.Fatalf("expected refreshed DB policy, got %#v", loaded)
+	}
+}
+
+func TestUpdateNameRefreshesNeverAndRefuses(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	configPath := writeAppMirrorConfig(t, "ubuntu", "never")
+	store := openAppTestStore(t, home, "ubuntu")
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.ConfigPath = configPath
+	cfg.UpdatePolicy = ""
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+	_ = store.Close()
+	restore := replaceUpdateWorkflow(func(string, *mirror.Service, appconfig.Config, config.Mirror, logging.Logger) error {
+		t.Fatal("update workflow must not run after refreshed never policy")
+		return nil
+	})
+	defer restore()
+
+	err = runUpdateCommandWithLogger(cli.Command{Name: "update", NameRef: "ubuntu"}, appCfg, logging.Nop())
+	if err == nil || !strings.Contains(err.Error(), "update policy is never") {
+		t.Fatalf("expected never policy error, got %v", err)
+	}
+}
+
+func TestPeriodicShouldRunUsesCalendarMonth(t *testing.T) {
+	published := state.PublishedRecord{SnapshotName: "ubuntu-focal-main_2026-01-31"}
+	shouldRun, message, err := periodicShouldRunForPublished("ubuntu", "monthly", published, time.Date(2026, 2, 27, 12, 0, 0, 0, time.Local))
+	if err != nil {
+		t.Fatalf("periodicShouldRunForPublished returned error: %v", err)
+	}
+	if shouldRun {
+		t.Fatalf("expected monthly to skip before calendar month: %q", message)
+	}
+	shouldRun, message, err = periodicShouldRunForPublished("ubuntu", "monthly", published, time.Date(2026, 2, 28, 12, 0, 0, 0, time.Local))
+	if err != nil {
+		t.Fatalf("periodicShouldRunForPublished returned error: %v", err)
+	}
+	if !shouldRun {
+		t.Fatalf("expected monthly to run on clamped next-month date: %q", message)
+	}
+}
+
+func TestPeriodicBatchSkipsWithTerminalAndInfoLogReasons(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	logPath := filepath.Join(t.TempDir(), "mirrors.log")
+	logger, err := logging.OpenFile(logPath, logging.Info)
+	if err != nil {
+		t.Fatalf("OpenFile returned error: %v", err)
+	}
+	defer func() {
+		_ = logger.Close()
+	}()
+	store := openAppTestStore(t, home, "ubuntu")
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	configPath := writeAppMirrorConfig(t, "ubuntu", "")
+	cfg.ConfigPath = configPath
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+	seedPublishedSnapshot(t, store, "ubuntu-focal-main_"+time.Now().Local().Format("2006-01-02"))
+	_ = store.Close()
+
+	output, err := captureStdout(func() error {
+		return runPeriodicBatchCommandWithLogger("daily", appCfg, logger)
+	})
+	if err != nil {
+		t.Fatalf("runPeriodicBatchCommandWithLogger returned error: %v", err)
+	}
+	if !strings.Contains(output, "no update policy configured") {
+		t.Fatalf("terminal output missing skip reason:\n%s", output)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	if !strings.Contains(string(data), "no update policy configured") {
+		t.Fatalf("info log missing skip reason:\n%s", string(data))
+	}
+}
+
+func TestPeriodicBatchRunsOnlyMatchingDuePublishedMirrors(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	var updated []string
+	restore := replaceUpdateWorkflow(func(_ string, _ *mirror.Service, _ appconfig.Config, cfg config.Mirror, _ logging.Logger) error {
+		updated = append(updated, cfg.Name)
+		return nil
+	})
+	defer restore()
+	createPeriodicMirror(t, home, "due", "daily", time.Now().Local().AddDate(0, 0, -2).Format("2006-01-02"), false)
+	createPeriodicMirror(t, home, "weekly", "weekly", time.Now().Local().AddDate(0, 0, -10).Format("2006-01-02"), false)
+	createPeriodicMirror(t, home, "never", "never", time.Now().Local().AddDate(0, 0, -2).Format("2006-01-02"), false)
+	createPeriodicMirror(t, home, "unpublished", "daily", "", false)
+	createPeriodicMirror(t, home, "not-due", "daily", time.Now().Local().Format("2006-01-02"), false)
+
+	output, err := captureStdout(func() error {
+		return runPeriodicBatchCommandWithLogger("daily", appCfg, logging.Nop())
+	})
+	if err != nil {
+		t.Fatalf("runPeriodicBatchCommandWithLogger returned error: %v", err)
+	}
+	if !reflect.DeepEqual(updated, []string{"due"}) {
+		t.Fatalf("unexpected updated mirrors: %#v", updated)
+	}
+	for _, want := range []string{"update policy is weekly", "update policy is never", "mirror is not published", "Daily skipped for mirror \"not-due\""} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestPeriodicBatchContinuesAfterOrdinaryFailureAndStopsOnDiskFailure(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	createPeriodicMirror(t, home, "first", "daily", time.Now().Local().AddDate(0, 0, -2).Format("2006-01-02"), false)
+	createPeriodicMirror(t, home, "second", "daily", time.Now().Local().AddDate(0, 0, -2).Format("2006-01-02"), false)
+	var updated []string
+	restore := replaceUpdateWorkflow(func(_ string, _ *mirror.Service, _ appconfig.Config, cfg config.Mirror, _ logging.Logger) error {
+		updated = append(updated, cfg.Name)
+		if cfg.Name == "first" {
+			return errors.New("ordinary failure")
+		}
+		return nil
+	})
+	err := runPeriodicBatchCommandWithLogger("daily", appCfg, logging.Nop())
+	restore()
+	if err == nil || !strings.Contains(err.Error(), "1 mirror failure") {
+		t.Fatalf("expected aggregate failure, got %v", err)
+	}
+	if !reflect.DeepEqual(updated, []string{"first", "second"}) {
+		t.Fatalf("expected batch to continue after ordinary failure, got %#v", updated)
+	}
+
+	updated = nil
+	restore = replaceUpdateWorkflow(func(_ string, _ *mirror.Service, _ appconfig.Config, cfg config.Mirror, _ logging.Logger) error {
+		updated = append(updated, cfg.Name)
+		return mirror.ErrInsufficientDiskSpace
+	})
+	err = runPeriodicBatchCommandWithLogger("daily", appCfg, logging.Nop())
+	restore()
+	if !errors.Is(err, mirror.ErrInsufficientDiskSpace) {
+		t.Fatalf("expected disk failure, got %v", err)
+	}
+	if !reflect.DeepEqual(updated, []string{"first"}) {
+		t.Fatalf("expected batch to stop after disk failure, got %#v", updated)
+	}
+}
+
+func TestPeriodicBatchStopsOnDiskFailureDuringConfigRefresh(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+	createPeriodicMirror(t, home, "first", "daily", time.Now().Local().AddDate(0, 0, -2).Format("2006-01-02"), false)
+	createPeriodicMirror(t, home, "second", "daily", time.Now().Local().AddDate(0, 0, -2).Format("2006-01-02"), false)
+	oldRefresh := refreshMirrorConfigForPeriodic
+	refreshMirrorConfigForPeriodic = func(name string, appCfg appconfig.Config, logger logging.Logger) (config.Mirror, error) {
+		if name == "first" {
+			return config.Mirror{}, syscall.ENOSPC
+		}
+		return oldRefresh(name, appCfg, logger)
+	}
+	defer func() {
+		refreshMirrorConfigForPeriodic = oldRefresh
+	}()
+	var updated []string
+	restore := replaceUpdateWorkflow(func(_ string, _ *mirror.Service, _ appconfig.Config, cfg config.Mirror, _ logging.Logger) error {
+		updated = append(updated, cfg.Name)
+		return nil
+	})
+	defer restore()
+
+	err := runPeriodicBatchCommandWithLogger("daily", appCfg, logging.Nop())
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("expected ENOSPC to stop batch, got %v", err)
+	}
+	if len(updated) != 0 {
+		t.Fatalf("expected no updates after config refresh disk failure, got %#v", updated)
+	}
+}
+
+// TestPeriodicBatchContinuesAfterBrokenMirrorDB covers defensive DB enumeration:
+// one corrupt mirror DB must be reported as a per-mirror failure without
+// preventing healthy mirrors from being processed.
+func TestPeriodicBatchContinuesAfterBrokenMirrorDB(t *testing.T) {
+	home := t.TempDir()
+	appCfg := setAppTestHome(t, home)
+
+	// Create a healthy mirror that is due for a daily run (published 2+ days ago).
+	dueDate := time.Now().Local().AddDate(0, 0, -2).Format("2006-01-02")
+	createPeriodicMirror(t, home, "ubuntu-valid", "daily", dueDate, false)
+
+	// Write garbage bytes to a DB file named so it sorts alphabetically before
+	// ubuntu-valid. The batch must report this DB as one failed mirror and keep
+	// processing later DB files.
+	brokenDBPath := filepath.Join(appCfg.DBDir(), "aaa-broken.sqlite")
+	if err := os.MkdirAll(filepath.Dir(brokenDBPath), 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(brokenDBPath, []byte("not a sqlite database"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var workflowCalledFor []string
+	restore := replaceUpdateWorkflow(func(_ string, _ *mirror.Service, _ appconfig.Config, cfg config.Mirror, _ logging.Logger) error {
+		workflowCalledFor = append(workflowCalledFor, cfg.Name)
+		return nil
+	})
+	defer restore()
+
+	_, err := captureStdout(func() error {
+		return runPeriodicBatchCommandWithLogger("daily", appCfg, logging.Nop())
+	})
+
+	// The batch must continue past the broken DB and still attempt ubuntu-valid.
+	if !reflect.DeepEqual(workflowCalledFor, []string{"ubuntu-valid"}) {
+		t.Errorf("expected batch to process ubuntu-valid after broken DB; workflows called for: %v", workflowCalledFor)
+	}
+	// The per-mirror failure for aaa-broken must be reflected in the aggregate error.
+	if err == nil || !strings.Contains(err.Error(), "1 mirror failure") {
+		t.Errorf("expected aggregate failure count error, got: %v", err)
+	}
+}
+
 func TestSummariesByURLReturnsAllMatches(t *testing.T) {
 	home := t.TempDir()
 	appCfg := setAppTestHome(t, home)
@@ -848,6 +1176,38 @@ gpg_passphrase = 1234
 	return path
 }
 
+func writeAppMirrorConfig(t *testing.T, name, updatePolicy string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name+".conf")
+	content := `[mirror]
+name = ` + name + `
+url = http://us.archive.ubuntu.com/ubuntu/
+dist = focal
+release = default
+origin = default
+label = default
+arch = amd64
+components = main
+path = preprod
+sign = no
+`
+	if updatePolicy != "" {
+		content += "update = " + updatePolicy + "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	return path
+}
+
+func replaceUpdateWorkflow(fn func(string, *mirror.Service, appconfig.Config, config.Mirror, logging.Logger) error) func() {
+	old := runUpdateWorkflow
+	runUpdateWorkflow = fn
+	return func() {
+		runUpdateWorkflow = old
+	}
+}
+
 func isolateAppConfig(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
@@ -883,6 +1243,53 @@ func openAppTestStore(t *testing.T, home, name string) *state.Store {
 		t.Fatalf("SaveMirrorConfig returned error: %v", err)
 	}
 	return store
+}
+
+func createPeriodicMirror(t *testing.T, home, name, policy, publishedDate string, hidden bool) {
+	t.Helper()
+	configPath := writeAppMirrorConfig(t, name, policy)
+	store := openAppTestStore(t, home, name)
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.ConfigPath = configPath
+	cfg.UpdatePolicy = policy
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
+	if publishedDate != "" {
+		snapshotName := name + "-focal-main_" + publishedDate
+		createdAt := testCleanupTime(snapshotName)
+		if err := store.CreateSnapshot(state.SnapshotRecord{Name: snapshotName, Kind: "regular", CreatedAt: createdAt}, nil); err != nil {
+			t.Fatalf("CreateSnapshot returned error: %v", err)
+		}
+		if err := store.SetPublished(state.PublishedRecord{
+			SnapshotName: snapshotName,
+			Path:         "preprod",
+			Suite:        "focal",
+			Component:    "main",
+			PublishedAt:  createdAt,
+			Hidden:       hidden,
+		}); err != nil {
+			t.Fatalf("SetPublished returned error: %v", err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+}
+
+func setAppTestUpdatePolicy(t *testing.T, store *state.Store, policy string) {
+	t.Helper()
+	cfg, err := store.MirrorConfig()
+	if err != nil {
+		t.Fatalf("MirrorConfig returned error: %v", err)
+	}
+	cfg.UpdatePolicy = policy
+	if err := store.SaveMirrorConfig(cfg); err != nil {
+		t.Fatalf("SaveMirrorConfig returned error: %v", err)
+	}
 }
 
 func writePoolFile(t *testing.T, home, poolPath, content string) {

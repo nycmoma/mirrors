@@ -23,6 +23,10 @@ func Load(path string) (Mirror, error) {
 	if err != nil {
 		return Mirror{}, err
 	}
+	updatePolicy, err := ParseUpdatePolicy(raw["update"])
+	if err != nil {
+		return Mirror{}, err
+	}
 
 	cfg := FromValues(Values{
 		Name:              strings.TrimSpace(raw["name"]),
@@ -35,6 +39,7 @@ func Load(path string) (Mirror, error) {
 		Components:        raw["components"],
 		Path:              strings.TrimSpace(raw["path"]),
 		Merge:             merge,
+		UpdatePolicy:      updatePolicy,
 		Server:            strings.TrimSpace(raw["server"]),
 		Signing:           signing,
 		GPGHome:           strings.TrimSpace(raw["gpg_home"]),
@@ -58,6 +63,7 @@ type Values struct {
 	Components        string
 	Path              string
 	Merge             Merge
+	UpdatePolicy      string
 	Server            string
 	Signing           Signing
 	GPGHome           string
@@ -74,18 +80,19 @@ func FromValues(values Values) Mirror {
 	signing.GPGPassphrase = strings.TrimSpace(values.GPGPassphrase)
 	signing.GPGPassphraseFile = strings.TrimSpace(values.GPGPassphraseFile)
 	return Mirror{
-		Name:       strings.TrimSpace(values.Name),
-		URL:        strings.TrimSpace(values.URL),
-		Dists:      splitList(values.Dist),
-		Releases:   splitList(defaultString(values.Release, "default")),
-		Origin:     strings.TrimSpace(defaultString(values.Origin, "default")),
-		Label:      strings.TrimSpace(defaultString(values.Label, "default")),
-		Arch:       splitList(values.Arch),
-		Components: splitList(values.Components),
-		Path:       strings.TrimSpace(values.Path),
-		Merge:      values.Merge,
-		Server:     strings.TrimSpace(values.Server),
-		Signing:    signing,
+		Name:         strings.TrimSpace(values.Name),
+		URL:          strings.TrimSpace(values.URL),
+		Dists:        splitList(values.Dist),
+		Releases:     splitList(defaultString(values.Release, "default")),
+		Origin:       strings.TrimSpace(defaultString(values.Origin, "default")),
+		Label:        strings.TrimSpace(defaultString(values.Label, "default")),
+		Arch:         splitList(values.Arch),
+		Components:   splitList(values.Components),
+		Path:         strings.TrimSpace(values.Path),
+		Merge:        values.Merge,
+		UpdatePolicy: strings.ToLower(strings.TrimSpace(values.UpdatePolicy)),
+		Server:       strings.TrimSpace(values.Server),
+		Signing:      signing,
 	}
 }
 
@@ -184,5 +191,15 @@ func ParseSigning(value string) (Signing, error) {
 		return Signing{Disabled: true}, nil
 	default:
 		return Signing{}, fmt.Errorf("invalid sign value %q: use yes or no", value)
+	}
+}
+
+func ParseUpdatePolicy(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "daily", "weekly", "monthly", "never":
+		return value, nil
+	default:
+		return "", fmt.Errorf("invalid update value %q: use daily, weekly, monthly, never, or leave empty", value)
 	}
 }

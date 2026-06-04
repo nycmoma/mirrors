@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 	"mirrors/internal/pool"
 	"mirrors/internal/state"
 )
+
+// ErrInsufficientDiskSpace marks download plans that cannot fit in the package pool.
+var ErrInsufficientDiskSpace = errors.New("not enough disk space")
 
 // DownloadPlan summarizes package download work before files are downloaded.
 type DownloadPlan struct {
